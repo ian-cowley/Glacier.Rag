@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>preview</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
+
+    <!-- NuGet Package Properties -->
+    <PackageId>Glacier.Rag</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Ian Cowley</Authors>
+    <Company>Glacier High-Performance Ecosystem</Company>
+    <Description>Pure C# .NET 10 in-process GraphRAG engine. Unifies dense SIMD vector search (Glacier.Vector) and zero-allocation CSR knowledge graph traversal (Glacier.Graph) directly with native LLM inference (Glacier.Inference) in a single memory space. Replaces Python LangChain, LlamaIndex, Chroma, and Neo4j.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ian-cowley/Glacier.Rag</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ian-cowley/Glacier.Rag.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>rag;graphrag;llm;vector-search;knowledge-graph;semantic-search;csharp;net10;glacier</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Glacier.Vector" Version="1.0.3" />
+    <PackageReference Include="Glacier.Graph" Version="1.0.3" />
+    <PackageReference Include="Glacier.Inference" Version="1.1.14" />
+    <PackageReference Include="Glacier.Tensor" Version="1.0.4" />
+  </ItemGroup>
+</Project>

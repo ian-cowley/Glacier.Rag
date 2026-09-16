@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Glacier.Rag/Glacier.Rag.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Glacier.Rag.Demo/Glacier.Rag.Demo.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Glacier.Rag.Tests/Glacier.Rag.Tests.csproj" />
+  </Folder>
+</Solution>
