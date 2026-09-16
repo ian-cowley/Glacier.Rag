@@ -1,3 +1,5 @@
+![Glacier AI Banner](assets/banner.jpg)
+
 # ⚡ Glacier.Rag
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -6,8 +8,6 @@
 [![Ecosystem](https://img.shields.io/badge/Glacier-Ecosystem-blue)](https://github.com/ian-cowley)
 
 > **Pure C# .NET 10 In-Process Native GraphRAG Engine (Systematically Beating Python LangChain, LlamaIndex, Chroma & Neo4j)**
-
-`Glacier.Rag` brings dense SIMD vector search (**Glacier.Vector**), zero-allocation CSR knowledge graph traversal (**Glacier.Graph**), and native LLM inference (**Glacier.Inference**) into the **exact same memory address space**.
 
 ```text
 ========================================================================================================
@@ -21,6 +21,21 @@
   ⚡ SERIALIZATION                                     :  0 ms (Zero JSON / Zero Protobuf IPC Churn)
   ⚡ PEAK RAM CONSUMPTION                              :  < 50 MB (vs 4+ GB across 4 Python/Java Daemons)
 ========================================================================================================
+```
+
+```mermaid
+flowchart LR
+    Q["User Query"] --> EMB["FastHash SIMD Embedding"]
+    EMB --> VEC["<b>Glacier.Vector</b><br/>622M vec/s SIMD Scan"]
+    Q --> EXT["Entity Extractor"]
+    EXT --> GRP["<b>Glacier.Graph</b><br/>CSR Forward-Star Hops"]
+    VEC --> FUS["<b>In-Process Fusion</b><br/>0.027 ms (27 µs)"]
+    GRP --> FUS
+    FUS --> INF["<b>Glacier.Inference</b><br/>RTX 4060 GPU SASS"]
+    INF --> RES["Streaming Answer"]
+
+    style FUS fill:#15803d,stroke:#22c55e,stroke-width:2px,color:#fff
+    style INF fill:#1d4ed8,stroke:#38bdf8,stroke-width:2px,color:#fff
 ```
 
 ---
