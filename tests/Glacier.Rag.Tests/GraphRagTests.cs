@@ -74,4 +74,26 @@ LedgerAccountDto validates through FluentValidation rules.";
         Assert.True(result.TotalRetrievalLatencyMs < 15.0, $"Retrieval must be < 15ms, took {result.TotalRetrievalLatencyMs:F2}ms");
         Assert.Contains("CustomerAccount", result.SynthesizedContext);
     }
+
+    [Fact]
+    public void GraphRagEngine_ScalesWithO1Retrieval_AcrossManyChunks()
+    {
+        using var rag = new GraphRagEngine(new FastHashEmbeddingModel(128));
+
+        // Index 2,000 synthetic chunks
+        for (int i = 0; i < 2000; i++)
+        {
+            rag.IndexDocument($"DOC_{i}", $"AccountEntity_{i} connects to DatabaseService_{i % 50} with TransactionLog_{i}.");
+        }
+
+        // Warmup JIT
+        _ = rag.Retrieve("warmup", new RagOptions { TopK = 1, MaxGraphHops = 1 });
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var result = rag.Retrieve("AccountEntity_1000", new RagOptions { TopK = 5, MaxGraphHops = 1 });
+        sw.Stop();
+
+        Assert.NotNull(result);
+        Assert.True(result.TotalRetrievalLatencyMs < 10.0, $"O(1) retrieval should take < 10ms for 2,000 chunks, took {result.TotalRetrievalLatencyMs:F3}ms (vec={result.VectorSearchLatencyMs:F3}ms, graph={result.GraphTraversalLatencyMs:F3}ms, totalElapsed={sw.Elapsed.TotalMilliseconds:F3}ms)");
+    }
 }

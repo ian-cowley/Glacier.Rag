@@ -1,6 +1,7 @@
 namespace Glacier.Rag.Engine;
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -19,14 +20,15 @@ using Glacier.Vector.Storage;
 
 public sealed class RagOptions
 {
-    public int TopK { get; init; } = 3;
-    public int MaxGraphHops { get; init; } = 2;
-    public int MaxContextTokens { get; init; } = 1500;
+    public int TopK { get; set; } = 3;
+    public int MaxGraphHops { get; set; } = 2;
+    public float MinSimilarity { get; set; } = 0.0f;
+    public bool SynthesizeWithLlm { get; set; } = false;
+    public int MaxTokensToGenerate { get; set; } = 128;
 }
 
 /// <summary>
-/// World-leading pure C# .NET 10 in-process GraphRAG engine.
-/// Fuses dense SIMD vector search (Glacier.Vector) with CSR Forward Star graph traversal (Glacier.Graph)
+/// High-throughput in-process GraphRAG engine integrating CSR Graph (Glacier.Graph), Vector Search (Glacier.Vector),
 /// and streaming native inference (Glacier.Inference) in the exact same memory space with sub-15ms latency.
 /// </summary>
 public sealed class GraphRagEngine : IDisposable
@@ -36,8 +38,9 @@ public sealed class GraphRagEngine : IDisposable
     private readonly VectorIndex _vectorIndex;
     private readonly GraphStore _graphStore;
     private readonly GraphSearch _graphSearch;
-    private readonly Dictionary<string, DocumentChunk> _chunksById = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, List<string>> _docEntities = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DocumentChunk> _chunksById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DocumentChunk> _chunksByContent = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, List<string>> _docEntities = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _syncLock = new();
     private bool _disposed;
 
@@ -79,6 +82,7 @@ public sealed class GraphRagEngine : IDisposable
                 _embeddingModel.GenerateEmbedding(chunk.Content, embBuffer);
                 _vectorIndex.Add(embBuffer, chunk.Content);
                 _chunksById[chunk.ChunkId] = chunk;
+                _chunksByContent[chunk.Content] = chunk;
 
                 // 2. Entity & Relation Graph Indexing
                 var (entities, triplets) = EntityExtractor.Extract(chunk.Content);
@@ -122,19 +126,14 @@ public sealed class GraphRagEngine : IDisposable
         var (queryEntities, _) = EntityExtractor.Extract(query);
         var allEntities = new HashSet<string>(queryEntities, StringComparer.OrdinalIgnoreCase);
 
-        // Also add entities found in top vector chunks
-        lock (_syncLock)
+        // Also add entities found in top vector chunks (O(1) dictionary lookup, zero lock contention)
+        foreach (var res in searchResults)
         {
-            foreach (var res in searchResults)
+            if (res.Metadata != null && _chunksByContent.TryGetValue(res.Metadata, out var chunk))
             {
-                // Find matching chunk by content
-                foreach (var chunk in _chunksById.Values)
+                if (_docEntities.TryGetValue(chunk.ChunkId, out var ents))
                 {
-                    if (chunk.Content == res.Metadata && _docEntities.TryGetValue(chunk.ChunkId, out var ents))
-                    {
-                        foreach (var e in ents) allEntities.Add(e);
-                        break;
-                    }
+                    for (int i = 0; i < ents.Count; i++) allEntities.Add(ents[i]);
                 }
             }
         }
