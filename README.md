@@ -42,28 +42,30 @@ flowchart LR
 
 ## 1. Why Glacier.Rag? Replacing the Brittle Python/JVM Stack
 
-In Python, building enterprise GraphRAG requires gluing together multiple independent daemons:
+In traditional Python setups, building enterprise GraphRAG requires gluing together multiple independent daemons:
 1. **ChromaDB / Qdrant** (Vector Database in Python/Rust/Go).
 2. **Neo4j / Memgraph** (Graph Database in JVM/C++).
 3. **LangChain / LlamaIndex** (Python orchestration framework).
 4. **vLLM / Ollama** (Inference server).
 
-Each query pays the penalty of **4 TCP socket round-trips**, JSON marshaling, garbage collection pauses, and multi-process IPC serialization.
+Each query pays the penalty of **multiple TCP socket round-trips**, JSON marshaling, GC pauses, and inter-process serialization.
 
-**Glacier.Rag** replaces all four with a single, self-contained .NET 10 library:
+**Glacier.Rag** consolidates all four into a single, in-process .NET 10 engine:
 * **`Glacier.Vector` Core**: 622M vectors/sec hardware SIMD dot product scans.
-* **`Glacier.Graph` Core**: Zero-allocation Forward Star CSR graph traversal.
-* **`Glacier.Inference` Core**: Sub-100ms GGUF model execution with Bare-Metal GPU SASS.
+* **`Glacier.Graph` Core**: Zero-allocation Forward-Star CSR graph traversal with hub pruning and full predicate retention (`Source -> Predicate -> Target`).
+* **`Glacier.Inference` Core**: In-process GGUF embedding extraction (`GlacierInferenceEmbeddingModel`) and bare-metal GPU/CPU streaming generation.
 
 ---
 
 ## 2. Quickstart
 
+### Hybrid Retrieval with Knowledge Graph Triplet Preservation
+
 ```csharp
 using Glacier.Rag.Embeddings;
 using Glacier.Rag.Engine;
 
-// 1. Initialize In-Process GraphRAG Engine
+// 1. Initialize In-Process GraphRAG Engine (Lexical FastHash or Semantic GlacierInference)
 using var rag = new GraphRagEngine(new FastHashEmbeddingModel(384));
 
 // 2. Ingest Enterprise Documents
@@ -74,12 +76,45 @@ TransactionJournal records every balance adjustment before mutating LedgerAccoun
 LedgerAccountDto validates through FluentValidation.
 ");
 
-// 3. Query with Sub-Millisecond Hybrid Retrieval
-var result = rag.Retrieve("How does CustomerRecord stream data and how is it validated?");
+// 3. Query with Sub-Millisecond Hybrid Retrieval & Predicate Preservation
+var result = rag.Retrieve("How does CustomerRecord stream data and how is it validated?", new RagOptions
+{
+    TopK = 3,
+    MaxGraphHops = 2,
+    MaxDegreePerNode = 25 // Hub pruning to prevent context flooding
+});
 
 Console.WriteLine($"Total Retrieval Latency: {result.TotalRetrievalLatencyMs:F2} ms");
-// Output: Total Retrieval Latency: 0.85 ms!
+foreach (var rel in result.GraphRelations)
+{
+    Console.WriteLine($"Relation: {rel.Source} -> [{rel.Relation}] -> {rel.Target}");
+}
+// Output:
+// Relation: CustomerRecord -> [STREAMS_FROM] -> SqlServerDatabase
+// Relation: LedgerAccountDto -> [VALIDATES] -> FluentValidation
 ```
+
+### End-to-End In-Process Streaming Generation
+
+```csharp
+using Glacier.Inference.Engine;
+
+// Attach a local GGUF model via Glacier.Inference
+using var session = new InferenceSession("models/qwen2.5-7b-instruct.gguf", device: "auto");
+
+// Stream the augmented answer directly in the exact same memory space
+string answer = await rag.AskAsync(
+    "How does CustomerRecord stream data and how is it validated?",
+    session,
+    onToken: token => Console.Write(token)
+);
+```
+
+---
+
+## Credits
+
+Developed by Ian Cowley and Antigravity (Google DeepMind).
 
 ---
 

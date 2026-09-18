@@ -10,8 +10,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Glacier.Graph.Storage;
 using Glacier.Graph.Traversal;
+using Glacier.Inference.Engine;
 using Glacier.Inference.Gguf;
 using Glacier.Inference.Model;
+using Glacier.Inference.Sampling;
 using Glacier.Rag.Chunking;
 using Glacier.Rag.Embeddings;
 using Glacier.Rag.Extraction;
@@ -22,9 +24,11 @@ public sealed class RagOptions
 {
     public int TopK { get; set; } = 3;
     public int MaxGraphHops { get; set; } = 2;
+    public int MaxDegreePerNode { get; set; } = 25;
+    public int MaxTriplets { get; set; } = 100;
     public float MinSimilarity { get; set; } = 0.0f;
     public bool SynthesizeWithLlm { get; set; } = false;
-    public int MaxTokensToGenerate { get; set; } = 128;
+    public int MaxTokensToGenerate { get; set; } = 256;
 }
 
 /// <summary>
@@ -138,22 +142,29 @@ public sealed class GraphRagEngine : IDisposable
             }
         }
 
-        // 3. Multi-hop Graph Traversal (Forward Star CSR)
+        // 3. Multi-hop Graph Traversal (Forward Star CSR) with Hub Pruning & Predicate Retention
         var relations = new List<GraphRelation>();
-        var neighborhoodNodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenTriplets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        int maxDegree = options?.MaxDegreePerNode ?? 25;
+        int maxTriplets = options?.MaxTriplets ?? 100;
 
         foreach (var entity in allEntities)
         {
-            var neighbors = _graphSearch.FindNeighborhood(entity, maxHops);
-            foreach (var n in neighbors)
+            if (relations.Count >= maxTriplets) break;
+            var triplets = _graphSearch.FindNeighborhoodTriplets(entity, maxHops, maxDegree, maxTriplets - relations.Count);
+            foreach (var t in triplets)
             {
-                neighborhoodNodes.Add(n);
-                relations.Add(new GraphRelation
+                string key = $"{t.Source}|{t.Predicate}|{t.Target}";
+                if (seenTriplets.Add(key))
                 {
-                    Source = entity,
-                    Target = n,
-                    Relation = "CONNECTED_TO"
-                });
+                    relations.Add(new GraphRelation
+                    {
+                        Source = t.Source,
+                        Target = t.Target,
+                        Relation = t.Predicate
+                    });
+                }
             }
         }
         swGraph.Stop();
@@ -191,6 +202,40 @@ public sealed class GraphRagEngine : IDisposable
             VectorSearchLatencyMs = swVec.Elapsed.TotalMilliseconds,
             GraphTraversalLatencyMs = swGraph.Elapsed.TotalMilliseconds
         };
+    }
+
+    /// <summary>
+    /// Executes end-to-end GraphRAG: retrieves hybrid context, synthesizes augmented prompt,
+    /// and streams answer tokens directly from Glacier.Inference in the exact same memory space.
+    /// </summary>
+    public async Task<string> AskAsync(
+        string query,
+        InferenceSession session,
+        RagOptions? options = null,
+        Action<string>? onToken = null,
+        CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(session);
+
+        var retrieval = Retrieve(query, options);
+        string prompt = BuildAugmentedPrompt(query, retrieval);
+
+        var samplingOptions = new SamplingOptions
+        {
+            MaxTokens = options?.MaxTokensToGenerate ?? 256,
+            Temperature = 0.7f,
+            TopP = 0.9f
+        };
+
+        var result = await session.GenerateAsync(
+            prompt,
+            samplingOptions,
+            formatChat: false,
+            onToken: onToken,
+            ct: ct);
+
+        return result.Text;
     }
 
     /// <summary>

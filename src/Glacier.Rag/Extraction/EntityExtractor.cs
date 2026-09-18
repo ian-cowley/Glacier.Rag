@@ -8,12 +8,18 @@ public readonly record struct EntityTriplet(string Subject, string Predicate, st
 
 /// <summary>
 /// High-speed entity and relational triplet extractor for enterprise domain text.
-/// Extracts key concepts, types, APIs, and relationships for insertion into Glacier.Graph.
+/// Extracts key concepts, types, APIs, acronyms, quoted terms, and multi-hop relationships for insertion into Glacier.Graph.
 /// </summary>
 public static class EntityExtractor
 {
     // Regex for matching PascalCase types / interfaces (e.g. IAsyncEnumerable, LedgerAccountDto, SqlServer)
     private static readonly Regex PascalCaseRegex = new(@"\b[I]?[A-Z][a-zA-Z0-9]{2,}\b", RegexOptions.Compiled);
+
+    // Regex for matching technical acronyms (e.g. SQL, HTTP, VRAM, SIMD, AVX, CSR, DTO, API)
+    private static readonly Regex AcronymRegex = new(@"\b[A-Z0-9_]{2,8}\b", RegexOptions.Compiled);
+
+    // Regex for matching quoted enterprise terms or phrases (e.g. "Customer Balance", "Account Table")
+    private static readonly Regex QuotedRegex = new(@"""([^""\r\n]{2,50})""|'([^'\r\n]{2,50})'", RegexOptions.Compiled);
 
     // Common relational trigger phrases
     private static readonly (string Phrase, string Relation)[] RelationTriggers =
@@ -30,7 +36,29 @@ public static class EntityExtractor
         ("uses", "USES"),
         ("produces", "PRODUCES"),
         ("stores", "STORES"),
-        ("manages", "MANAGES")
+        ("manages", "MANAGES"),
+        ("connects to", "CONNECTS_TO"),
+        ("communicates with", "COMMUNICATES_WITH"),
+        ("invokes", "INVOKES"),
+        ("calls", "CALLS"),
+        ("publishes to", "PUBLISHES_TO"),
+        ("subscribes to", "SUBSCRIBES_TO"),
+        ("writes to", "WRITES_TO"),
+        ("reads from", "READS_FROM"),
+        ("processes", "PROCESSES"),
+        ("transforms", "TRANSFORMS"),
+        ("authenticates with", "AUTHENTICATES_WITH"),
+        ("authorizes", "AUTHORIZES"),
+        ("loads", "LOADS"),
+        ("persists to", "PERSISTS_TO"),
+        ("serializes", "SERIALIZES"),
+        ("deserializes", "DESERIALIZES"),
+        ("dispatches to", "DISPATCHES_TO"),
+        ("indexes", "INDEXES"),
+        ("integrates with", "INTEGRATES_WITH"),
+        ("exposes", "EXPOSES"),
+        ("consumes", "CONSUMES"),
+        ("notifies", "NOTIFIES")
     ];
 
     /// <summary>
@@ -44,21 +72,46 @@ public static class EntityExtractor
         if (string.IsNullOrWhiteSpace(text))
             return (new List<string>(), triplets);
 
-        // 1. Extract PascalCase entities
-        var matches = PascalCaseRegex.Matches(text);
         var foundEntitiesInOrder = new List<string>();
 
-        foreach (Match match in matches)
+        // 1. Extract quoted terms
+        var quotedMatches = QuotedRegex.Matches(text);
+        foreach (Match match in quotedMatches)
+        {
+            string val = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
+            val = val.Trim();
+            if (val.Length >= 2 && !IsCommonKeyword(val))
+            {
+                if (entities.Add(val))
+                    foundEntitiesInOrder.Add(val);
+            }
+        }
+
+        // 2. Extract PascalCase entities
+        var pascalMatches = PascalCaseRegex.Matches(text);
+        foreach (Match match in pascalMatches)
         {
             string val = match.Value;
             if (val.Length > 2 && !IsCommonKeyword(val))
             {
-                entities.Add(val);
-                foundEntitiesInOrder.Add(val);
+                if (entities.Add(val))
+                    foundEntitiesInOrder.Add(val);
             }
         }
 
-        // 2. Extract relation triplets based on sentence proximity and triggers
+        // 3. Extract uppercase technical acronyms
+        var acronymMatches = AcronymRegex.Matches(text);
+        foreach (Match match in acronymMatches)
+        {
+            string val = match.Value;
+            if (val.Length >= 2 && !IsCommonKeyword(val))
+            {
+                if (entities.Add(val))
+                    foundEntitiesInOrder.Add(val);
+            }
+        }
+
+        // 4. Extract relation triplets based on sentence proximity and triggers
         var sentences = text.Split(['.', ';', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         foreach (var sentence in sentences)
         {
@@ -81,8 +134,8 @@ public static class EntityExtractor
             }
         }
 
-        // 3. Fallback: If entities co-occur in the same chunk, link them with CO_OCCURS
-        for (int i = 0; i < Math.Min(foundEntitiesInOrder.Count - 1, 4); i++)
+        // 5. Fallback: If entities co-occur in the same chunk, link them with RELATED_TO
+        for (int i = 0; i < Math.Min(foundEntitiesInOrder.Count - 1, 6); i++)
         {
             string a = foundEntitiesInOrder[i];
             string b = foundEntitiesInOrder[i + 1];
@@ -97,18 +150,42 @@ public static class EntityExtractor
 
     private static string? FindClosestEntity(string slice, bool fromEnd)
     {
-        var matches = PascalCaseRegex.Matches(slice);
-        if (matches.Count == 0) return null;
+        // Check quoted first
+        var qMatches = QuotedRegex.Matches(slice);
+        if (qMatches.Count > 0)
+        {
+            Match target = fromEnd ? qMatches[qMatches.Count - 1] : qMatches[0];
+            string val = (target.Groups[1].Success ? target.Groups[1].Value : target.Groups[2].Value).Trim();
+            if (!IsCommonKeyword(val)) return val;
+        }
 
-        Match targetMatch = fromEnd ? matches[matches.Count - 1] : matches[0];
-        string val = targetMatch.Value;
-        return IsCommonKeyword(val) ? null : val;
+        // Check PascalCase
+        var pMatches = PascalCaseRegex.Matches(slice);
+        if (pMatches.Count > 0)
+        {
+            Match target = fromEnd ? pMatches[pMatches.Count - 1] : pMatches[0];
+            string val = target.Value;
+            if (!IsCommonKeyword(val)) return val;
+        }
+
+        // Check Acronym
+        var aMatches = AcronymRegex.Matches(slice);
+        if (aMatches.Count > 0)
+        {
+            Match target = fromEnd ? aMatches[aMatches.Count - 1] : aMatches[0];
+            string val = target.Value;
+            if (!IsCommonKeyword(val)) return val;
+        }
+
+        return null;
     }
 
     private static bool IsCommonKeyword(string word) => word switch
     {
         "The" or "This" or "That" or "There" or "These" or "Those" or "When" or "Where" 
-        or "What" or "With" or "From" or "Then" or "Step" or "Example" or "Method" or "Below" => true,
+        or "What" or "With" or "From" or "Then" or "Step" or "Example" or "Method" or "Below" 
+        or "AND" or "OR" or "NOT" or "FOR" or "THE" or "ALL" or "ANY" or "TRUE" or "FALSE" 
+        or "NULL" or "GET" or "SET" or "USE" or "NEW" or "HOW" or "WHY" or "CAN" or "OUT" => true,
         _ => false
     };
 }

@@ -29,9 +29,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Glacier.Vector" Version="1.0.5" />
-    <PackageReference Include="Glacier.Graph" Version="1.0.3" />
-    <PackageReference Include="Glacier.Inference" Version="1.2.0" />
+    <ProjectReference Include="..\..\..\Glacier.Vector\src\Glacier.Vector\Glacier.Vector.csproj" />
+    <ProjectReference Include="..\..\..\Glacier.Graph\src\Glacier.Graph\Glacier.Graph.csproj" />
+    <ProjectReference Include="..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj" />
     <PackageReference Include="Glacier.Tensor" Version="1.0.6" />
   </ItemGroup>
 </Project>

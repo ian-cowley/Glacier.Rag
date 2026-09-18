@@ -6,9 +6,10 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 
 /// <summary>
-/// Ultra-fast, deterministic SIMD feature hashing embedding model.
-/// Projects character n-grams and token tokens into normalized dense Euclidean space in sub-microseconds.
-/// Guarantees zero allocations and extreme throughput for embedded, zero-model, and low-latency testing.
+/// Deterministic lexical SIMD feature hashing embedding model.
+/// Projects character n-grams and word tokens into normalized Euclidean space in sub-microseconds using SIMD vector normalization.
+/// Provides extreme throughput for lexical retrieval, embedded environments, and zero-weight baseline testing.
+/// Note: This is a lexical/n-gram hashing model; for deep semantic language understanding, use GlacierInferenceEmbeddingModel.
 /// </summary>
 public sealed class FastHashEmbeddingModel : IEmbeddingModel
 {
@@ -97,20 +98,41 @@ public sealed class FastHashEmbeddingModel : IEmbeddingModel
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void NormalizeL2(Span<float> vec)
+    private static void NormalizeL2(Span<float> vec)
     {
-        float sumSq = 0f;
-        for (int i = 0; i < vec.Length; i++)
+        int i = 0;
+        int vCount = Vector<float>.Count;
+        var sumVec = Vector<float>.Zero;
+
+        while (i <= vec.Length - vCount)
+        {
+            var v = new Vector<float>(vec.Slice(i, vCount));
+            sumVec += v * v;
+            i += vCount;
+        }
+
+        float sumSq = Vector.Dot(sumVec, Vector<float>.One);
+        while (i < vec.Length)
         {
             sumSq += vec[i] * vec[i];
+            i++;
         }
 
         if (sumSq > 0f)
         {
             float invNorm = 1.0f / MathF.Sqrt(sumSq);
-            for (int i = 0; i < vec.Length; i++)
+            var invVec = new Vector<float>(invNorm);
+            i = 0;
+            while (i <= vec.Length - vCount)
+            {
+                var v = new Vector<float>(vec.Slice(i, vCount));
+                (v * invVec).CopyTo(vec.Slice(i, vCount));
+                i += vCount;
+            }
+            while (i < vec.Length)
             {
                 vec[i] *= invNorm;
+                i++;
             }
         }
     }

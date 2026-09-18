@@ -96,4 +96,53 @@ LedgerAccountDto validates through FluentValidation rules.";
         Assert.NotNull(result);
         Assert.True(result.TotalRetrievalLatencyMs < 10.0, $"O(1) retrieval should take < 10ms for 2,000 chunks, took {result.TotalRetrievalLatencyMs:F3}ms (vec={result.VectorSearchLatencyMs:F3}ms, graph={result.GraphTraversalLatencyMs:F3}ms, totalElapsed={sw.Elapsed.TotalMilliseconds:F3}ms)");
     }
+
+    [Fact]
+    public void EntityExtractor_FindsAcronymsAndQuotedEntities_AndExpandedRelations()
+    {
+        string text = @"""Payment Gateway"" connects to SQL. The HTTP API persists to DatabaseStore.";
+        var (entities, triplets) = EntityExtractor.Extract(text);
+
+        Assert.Contains("Payment Gateway", entities);
+        Assert.Contains("SQL", entities);
+        Assert.Contains("HTTP", entities);
+        Assert.Contains("API", entities);
+        Assert.Contains("DatabaseStore", entities);
+
+        Assert.Contains(triplets, t => t.Predicate == "CONNECTS_TO");
+        Assert.Contains(triplets, t => t.Predicate == "PERSISTS_TO");
+    }
+
+    [Fact]
+    public void GraphRagEngine_PreservesTruePredicates_InSynthesizedContext()
+    {
+        using var rag = new GraphRagEngine(new FastHashEmbeddingModel(128));
+
+        string doc = "CustomerAccount streams from SqlServerDatabase. LedgerAccountDto validates through FluentValidation.";
+        rag.IndexDocument("SPEC-REL", doc);
+
+        var result = rag.Retrieve("CustomerAccount");
+
+        Assert.NotNull(result);
+        Assert.NotEmpty(result.GraphRelations);
+        Assert.Contains(result.GraphRelations, r => r.Relation == "STREAMS_FROM" || r.Relation == "VALIDATES");
+        Assert.Contains("STREAMS_FROM", result.SynthesizedContext);
+    }
+
+    [Fact]
+    public void GraphRagEngine_PrunesHubNodes_PreventsContextExplosion()
+    {
+        using var rag = new GraphRagEngine(new FastHashEmbeddingModel(128));
+
+        // Create a central hub node connected to 40 distinct services
+        for (int i = 0; i < 40; i++)
+        {
+            rag.IndexDocument($"HUB_{i}", $"CentralHubService manages MicroserviceNode_{i}.");
+        }
+
+        var result = rag.Retrieve("CentralHubService", new RagOptions { MaxDegreePerNode = 5, MaxTriplets = 10 });
+
+        Assert.NotNull(result);
+        Assert.True(result.GraphRelations.Count <= 10, $"Should not exceed MaxTriplets=10, got {result.GraphRelations.Count}");
+    }
 }
