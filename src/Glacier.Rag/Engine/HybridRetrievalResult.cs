@@ -23,6 +23,7 @@ public sealed class HybridRetrievalResult
     public required IReadOnlyList<string> DiscoveredEntities { get; init; }
     public required IReadOnlyList<GraphRelation> GraphRelations { get; init; }
     public required string SynthesizedContext { get; init; }
+    public IReadOnlyList<HybridGraphScorer.ScoredChunk>? ScoredChunks { get; init; }
     public double VectorSearchLatencyMs { get; init; }
     public double GraphTraversalLatencyMs { get; init; }
     public double TotalRetrievalLatencyMs => VectorSearchLatencyMs + GraphTraversalLatencyMs;

@@ -145,4 +145,98 @@ LedgerAccountDto validates through FluentValidation rules.";
         Assert.NotNull(result);
         Assert.True(result.GraphRelations.Count <= 10, $"Should not exceed MaxTriplets=10, got {result.GraphRelations.Count}");
     }
+
+    [Fact]
+    public void LinearProjectionEmbeddingModel_ProducesNormalizedOutput()
+    {
+        using var upstream = new FastHashEmbeddingModel(128);
+        using var proj = new LinearProjectionEmbeddingModel(upstream, outputDim: 64, seed: 42);
+
+        Assert.Equal(64, proj.Dimensions);
+        Assert.Equal(128, proj.InputDimensions);
+
+        Span<float> emb = stackalloc float[64];
+        proj.GenerateEmbedding("PaymentGateway transfers fund to CustomerAccount", emb);
+
+        float sumSq = 0f;
+        for (int i = 0; i < 64; i++) sumSq += emb[i] * emb[i];
+
+        Assert.True(MathF.Abs(sumSq - 1.0f) < 1e-4f, $"L2 norm must be 1.0, got {sumSq}");
+    }
+
+    [Fact]
+    public void HybridGraphScorer_CombinesDenseAndGraphRankingsWithRrf()
+    {
+        var store = new Glacier.Graph.Storage.GraphStore();
+        store.AddEdge("Apple", "Fruit", "IS_A");
+        store.AddEdge("Carrot", "Vegetable", "IS_A");
+
+        var search = new Glacier.Graph.Traversal.GraphSearch(store);
+
+        var matches = new[]
+        {
+            new Glacier.Vector.Index.SearchResult(0, 0.95f, "AppleChunk"),
+            new Glacier.Vector.Index.SearchResult(1, 0.90f, "CarrotChunk")
+        };
+
+        var queryEntities = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Fruit" };
+        var chunkEntities = new Dictionary<string, List<string>>(StringComparer.Ordinal)
+        {
+            ["AppleChunk"] = new List<string> { "Apple" },
+            ["CarrotChunk"] = new List<string> { "Carrot" }
+        };
+        var chunkContent = new Dictionary<string, string>
+        {
+            ["AppleChunk"] = "Apples are delicious fruits.",
+            ["CarrotChunk"] = "Carrots are root vegetables."
+        };
+
+        var reranked = HybridGraphScorer.ScoreAndRerank(
+            matches,
+            queryEntities,
+            chunkEntities,
+            chunkContent,
+            store,
+            search);
+
+        Assert.Equal(2, reranked.Count);
+        Assert.Equal("AppleChunk", reranked[0].ChunkId);
+        Assert.True(reranked[0].GraphScore > 0f);
+        Assert.True(reranked[0].HybridScore > reranked[1].HybridScore);
+    }
+
+    [Fact]
+    public void GraphRagEngine_ConcurrentRetrievalAndIndexing_NeverDeadlocks()
+    {
+        using var rag = new GraphRagEngine(new FastHashEmbeddingModel(128));
+
+        // Index initial docs
+        for (int i = 0; i < 10; i++)
+        {
+            rag.IndexDocument($"DOC_{i}", $"Service_{i} connects to Database_{i % 3}.");
+        }
+
+        System.Threading.Tasks.Parallel.For(0, 16, taskIdx =>
+        {
+            if (taskIdx % 2 == 0)
+            {
+                // Writer
+                for (int j = 0; j < 5; j++)
+                {
+                    rag.IndexDocument($"CONC_{taskIdx}_{j}", $"ParallelNode_{taskIdx}_{j} routes to Service_0.");
+                }
+            }
+            else
+            {
+                // Reader
+                for (int j = 0; j < 10; j++)
+                {
+                    var res = rag.Retrieve("Service_0", new RagOptions { TopK = 3, MaxGraphHops = 2 });
+                    Assert.NotNull(res);
+                }
+            }
+        });
+
+        Assert.True(rag.IndexedChunksCount >= 10);
+    }
 }

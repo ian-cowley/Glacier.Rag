@@ -12,7 +12,7 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Rag</PackageId>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Pure C# .NET 10 in-process GraphRAG engine. Unifies dense SIMD vector search (Glacier.Vector) and zero-allocation CSR knowledge graph traversal (Glacier.Graph) directly with native LLM inference (Glacier.Inference) in a single memory space. Replaces Python LangChain, LlamaIndex, Chroma, and Neo4j.</Description>
@@ -32,6 +32,6 @@
     <ProjectReference Include="..\..\..\Glacier.Vector\src\Glacier.Vector\Glacier.Vector.csproj" />
     <ProjectReference Include="..\..\..\Glacier.Graph\src\Glacier.Graph\Glacier.Graph.csproj" />
     <ProjectReference Include="..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj" />
-    <PackageReference Include="Glacier.Tensor" Version="1.0.6" />
+    <PackageReference Include="Glacier.Tensor" Version="1.0.7" />
   </ItemGroup>
 </Project>

@@ -34,6 +34,7 @@ public sealed class RagOptions
 /// <summary>
 /// High-throughput in-process GraphRAG engine integrating CSR Graph (Glacier.Graph), Vector Search (Glacier.Vector),
 /// and streaming native inference (Glacier.Inference) in the exact same memory space with sub-15ms latency.
+/// Synchronized with reader-writer locking to allow unbounded concurrent retrieval queries.
 /// </summary>
 public sealed class GraphRagEngine : IDisposable
 {
@@ -45,7 +46,7 @@ public sealed class GraphRagEngine : IDisposable
     private readonly ConcurrentDictionary<string, DocumentChunk> _chunksById = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DocumentChunk> _chunksByContent = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, List<string>> _docEntities = new(StringComparer.OrdinalIgnoreCase);
-    private readonly object _syncLock = new();
+    private readonly ReaderWriterLockSlim _rwLock = new(LockRecursionPolicy.SupportsRecursion);
     private bool _disposed;
 
     public int IndexedChunksCount => _vectorIndex.Count;
@@ -73,7 +74,8 @@ public sealed class GraphRagEngine : IDisposable
         var chunks = DocumentChunker.ChunkText(docId, text);
         float[] embBuffer = new float[_embeddingModel.Dimensions];
 
-        lock (_syncLock)
+        _rwLock.EnterWriteLock();
+        try
         {
             foreach (var chunk in chunks)
             {
@@ -91,6 +93,7 @@ public sealed class GraphRagEngine : IDisposable
                 // 2. Entity & Relation Graph Indexing
                 var (entities, triplets) = EntityExtractor.Extract(chunk.Content);
                 _docEntities[chunk.ChunkId] = entities;
+                _docEntities[chunk.Content] = entities;
 
                 foreach (var entity in entities)
                 {
@@ -103,12 +106,16 @@ public sealed class GraphRagEngine : IDisposable
                 }
             }
         }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
 
         return chunks.Count;
     }
 
     /// <summary>
-    /// Executes hybrid retrieval combining dense vector search and multi-hop graph hops.
+    /// Executes hybrid retrieval combining dense vector search and multi-hop graph hops with authentic RRF scoring.
     /// Completes in sub-15ms.
     /// </summary>
     public HybridRetrievalResult Retrieve(string query, RagOptions? options = null)
@@ -118,90 +125,130 @@ public sealed class GraphRagEngine : IDisposable
         int topK = options?.TopK ?? 3;
         int maxHops = options?.MaxGraphHops ?? 2;
 
-        // 1. Vector Search
-        var swVec = Stopwatch.StartNew();
-        float[] queryEmb = new float[_embeddingModel.Dimensions];
-        _embeddingModel.GenerateEmbedding(query, queryEmb);
-        var searchResults = _vectorIndex.Search(queryEmb, topK: topK);
-        swVec.Stop();
-
-        // 2. Extract query entities & seed from vector matches
-        var swGraph = Stopwatch.StartNew();
-        var (queryEntities, _) = EntityExtractor.Extract(query);
-        var allEntities = new HashSet<string>(queryEntities, StringComparer.OrdinalIgnoreCase);
-
-        // Also add entities found in top vector chunks (O(1) dictionary lookup, zero lock contention)
-        foreach (var res in searchResults)
+        _rwLock.EnterReadLock();
+        try
         {
-            if (res.Metadata != null && _chunksByContent.TryGetValue(res.Metadata, out var chunk))
+            // 1. Vector Search
+            var swVec = Stopwatch.StartNew();
+            float[] queryEmb = new float[_embeddingModel.Dimensions];
+            _embeddingModel.GenerateEmbedding(query, queryEmb);
+            var searchResults = _vectorIndex.Search(queryEmb, topK: topK);
+            swVec.Stop();
+
+            // 2. Extract query entities & seed from vector matches
+            var swGraph = Stopwatch.StartNew();
+            var (queryEntities, _) = EntityExtractor.Extract(query);
+            var allEntities = new HashSet<string>(queryEntities, StringComparer.OrdinalIgnoreCase);
+
+            // Also add entities found in top vector chunks (O(1) dictionary lookup, zero lock contention)
+            foreach (var res in searchResults)
             {
-                if (_docEntities.TryGetValue(chunk.ChunkId, out var ents))
+                if (res.Metadata != null && _chunksByContent.TryGetValue(res.Metadata, out var chunk))
                 {
-                    for (int i = 0; i < ents.Count; i++) allEntities.Add(ents[i]);
-                }
-            }
-        }
-
-        // 3. Multi-hop Graph Traversal (Forward Star CSR) with Hub Pruning & Predicate Retention
-        var relations = new List<GraphRelation>();
-        var seenTriplets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        int maxDegree = options?.MaxDegreePerNode ?? 25;
-        int maxTriplets = options?.MaxTriplets ?? 100;
-
-        foreach (var entity in allEntities)
-        {
-            if (relations.Count >= maxTriplets) break;
-            var triplets = _graphSearch.FindNeighborhoodTriplets(entity, maxHops, maxDegree, maxTriplets - relations.Count);
-            foreach (var t in triplets)
-            {
-                string key = $"{t.Source}|{t.Predicate}|{t.Target}";
-                if (seenTriplets.Add(key))
-                {
-                    relations.Add(new GraphRelation
+                    if (_docEntities.TryGetValue(chunk.ChunkId, out var ents))
                     {
-                        Source = t.Source,
-                        Target = t.Target,
-                        Relation = t.Predicate
-                    });
+                        for (int i = 0; i < ents.Count; i++) allEntities.Add(ents[i]);
+                    }
                 }
             }
-        }
-        swGraph.Stop();
 
-        // 4. Synthesize Context Prompt
-        var sb = new StringBuilder();
-        sb.AppendLine("=== KNOWLEDGE GRAPH STRUCTURAL RELATIONSHIPS ===");
-        if (relations.Count > 0)
-        {
-            foreach (var r in relations)
+            // 3. Multi-hop Graph Traversal (Forward Star CSR) with Hub Pruning & Predicate Retention
+            var relations = new List<GraphRelation>();
+            var seenTriplets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            int maxDegree = options?.MaxDegreePerNode ?? 25;
+            int maxTriplets = options?.MaxTriplets ?? 100;
+
+            foreach (var entity in allEntities)
             {
-                sb.AppendLine($"* {r.Source} -> {r.Relation} -> {r.Target}");
+                if (relations.Count >= maxTriplets) break;
+                var triplets = _graphSearch.FindNeighborhoodTriplets(entity, maxHops, maxDegree, maxTriplets - relations.Count);
+                foreach (var t in triplets)
+                {
+                    string key = $"{t.Source}|{t.Predicate}|{t.Target}";
+                    if (seenTriplets.Add(key))
+                    {
+                        relations.Add(new GraphRelation
+                        {
+                            Source = t.Source,
+                            Target = t.Target,
+                            Relation = t.Predicate
+                        });
+                    }
+                }
             }
-        }
-        else
-        {
-            sb.AppendLine("(Direct entities active in context)");
-        }
+            swGraph.Stop();
 
-        sb.AppendLine("\n=== RETRIEVED SEMANTIC DOCUMENT EXCERPTS ===");
-        for (int i = 0; i < searchResults.Length; i++)
-        {
-            sb.AppendLine($"[Source {i + 1}] (Relevance: {searchResults[i].Score:F4})");
-            sb.AppendLine(searchResults[i].Metadata);
-            sb.AppendLine();
-        }
+            // 4. Authentic Hybrid Graph-Dense Joint Scoring via Reciprocal Rank Fusion (RRF)
+            var queryEntitySet = new HashSet<string>(queryEntities, StringComparer.OrdinalIgnoreCase);
+            var chunkContentMap = new Dictionary<string, string>(_chunksByContent.Count, StringComparer.Ordinal);
+            foreach (var kvp in _chunksByContent)
+            {
+                chunkContentMap[kvp.Key] = kvp.Value.Content;
+            }
 
-        return new HybridRetrievalResult
+            var scoredChunks = HybridGraphScorer.ScoreAndRerank(
+                searchResults,
+                queryEntitySet,
+                _docEntities,
+                chunkContentMap,
+                _graphStore,
+                _graphSearch,
+                denseWeight: 0.5f,
+                kSmoothing: 60);
+
+            // 5. Synthesize Context Prompt
+            var sb = new StringBuilder();
+            sb.AppendLine("=== KNOWLEDGE GRAPH STRUCTURAL RELATIONSHIPS ===");
+            if (relations.Count > 0)
+            {
+                foreach (var r in relations)
+                {
+                    sb.AppendLine($"* {r.Source} -> {r.Relation} -> {r.Target}");
+                }
+            }
+            else
+            {
+                sb.AppendLine("(Direct entities active in context)");
+            }
+
+            sb.AppendLine("\n=== RETRIEVED SEMANTIC DOCUMENT EXCERPTS ===");
+            if (scoredChunks.Count > 0)
+            {
+                for (int i = 0; i < scoredChunks.Count; i++)
+                {
+                    var sc = scoredChunks[i];
+                    sb.AppendLine($"[Source {i + 1}] (Relevance: {sc.DenseScore:F4})");
+                    sb.AppendLine(sc.Content);
+                    sb.AppendLine();
+                }
+            }
+            else
+            {
+                for (int i = 0; i < searchResults.Length; i++)
+                {
+                    sb.AppendLine($"[Source {i + 1}] (Relevance: {searchResults[i].Score:F4})");
+                    sb.AppendLine(searchResults[i].Metadata);
+                    sb.AppendLine();
+                }
+            }
+
+            return new HybridRetrievalResult
+            {
+                Query = query,
+                VectorMatches = searchResults,
+                DiscoveredEntities = new List<string>(allEntities),
+                GraphRelations = relations,
+                SynthesizedContext = sb.ToString(),
+                ScoredChunks = scoredChunks,
+                VectorSearchLatencyMs = swVec.Elapsed.TotalMilliseconds,
+                GraphTraversalLatencyMs = swGraph.Elapsed.TotalMilliseconds
+            };
+        }
+        finally
         {
-            Query = query,
-            VectorMatches = searchResults,
-            DiscoveredEntities = new List<string>(allEntities),
-            GraphRelations = relations,
-            SynthesizedContext = sb.ToString(),
-            VectorSearchLatencyMs = swVec.Elapsed.TotalMilliseconds,
-            GraphTraversalLatencyMs = swGraph.Elapsed.TotalMilliseconds
-        };
+            _rwLock.ExitReadLock();
+        }
     }
 
     /// <summary>
@@ -256,6 +303,7 @@ public sealed class GraphRagEngine : IDisposable
         if (!_disposed)
         {
             _disposed = true;
+            _rwLock.Dispose();
             _embeddingModel.Dispose();
             _vectorIndex.Dispose();
             _vectorStorage.Dispose();
