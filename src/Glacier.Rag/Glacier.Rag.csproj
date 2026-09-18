@@ -28,10 +28,31 @@
     <None Include="..\..\README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="Exists('..\..\..\Glacier.Vector\src\Glacier.Vector\Glacier.Vector.csproj')">
     <ProjectReference Include="..\..\..\Glacier.Vector\src\Glacier.Vector\Glacier.Vector.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('..\..\..\Glacier.Vector\src\Glacier.Vector\Glacier.Vector.csproj')">
+    <PackageReference Include="Glacier.Vector" Version="1.0.7" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('..\..\..\Glacier.Graph\src\Glacier.Graph\Glacier.Graph.csproj')">
     <ProjectReference Include="..\..\..\Glacier.Graph\src\Glacier.Graph\Glacier.Graph.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('..\..\..\Glacier.Graph\src\Glacier.Graph\Glacier.Graph.csproj')">
+    <PackageReference Include="Glacier.Graph" Version="1.0.4" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj')">
     <ProjectReference Include="..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj')">
+    <PackageReference Include="Glacier.Inference" Version="1.2.2" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('..\..\..\Glacier.Tensor\src\Glacier.Tensor\Glacier.Tensor.csproj')">
+    <ProjectReference Include="..\..\..\Glacier.Tensor\src\Glacier.Tensor\Glacier.Tensor.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('..\..\..\Glacier.Tensor\src\Glacier.Tensor\Glacier.Tensor.csproj')">
     <PackageReference Include="Glacier.Tensor" Version="1.0.7" />
   </ItemGroup>
 </Project>
