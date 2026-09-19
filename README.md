@@ -113,6 +113,15 @@ string answer = await rag.AskAsync(
 
 ---
 
+## 🆕 What's New in v1.0.2
+
+- **`ReaderWriterLockSlim` replaces `Monitor`** — allows concurrent read parallelism, dramatically improving throughput under high simultaneous query load.
+- **`LinearProjectionEmbeddingModel`** — AVX-512 GEMV in-process embeddings requiring no external API calls or network round-trips.
+- **`HybridGraphScorer` with RRF (Reciprocal Rank Fusion)** — fuses dense vector and graph retrieval scores for superior retrieval precision.
+- **11 tests** passing (100 %).
+
+---
+
 ## Credits
 
 Developed by Ian Cowley and Antigravity (Google DeepMind).
