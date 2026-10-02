@@ -31,7 +31,7 @@
   <ItemGroup>
     <PackageReference Include="Glacier.Vector" Version="1.0.7" />
     <PackageReference Include="Glacier.Graph" Version="1.0.4" />
-    <PackageReference Include="Glacier.Inference" Version="1.2.2" />
+    <PackageReference Include="Glacier.Inference" Version="1.2.3" />
     <PackageReference Include="Glacier.Tensor" Version="1.0.9" />
   </ItemGroup>
 </Project>
