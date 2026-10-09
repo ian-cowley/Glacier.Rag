@@ -12,16 +12,20 @@
 
 ```text
 ========================================================================================================
-  GRAPHRAG QUERY LATENCY BENCHMARK (HYBRID DENSE VECTOR + 2-HOP KNOWLEDGE GRAPH SEARCH)
+  GRAPHRAG QUERY LATENCY BENCHMARK: IN-PROCESS VS. DISTRIBUTED MULTI-DAEMON
 ========================================================================================================
-  Python Stack (LangChain + ChromaDB + Neo4j via TCP) :  12,000 – 18,000 ms (12–18 seconds)
-  Glacier.Rag (.NET 10 - In-Process Memory-Mapped)    :  0.027 ms (27 µs | 37,265 queries/sec)
+  Distributed Python Stack (LangChain + ChromaDB + Neo4j via TCP IPC) :  12,000 – 18,000 ms (end-to-end)
+  Glacier.Rag (.NET 10 - In-Process Memory-Mapped Hybrid Retrieval)   :  0.027 – 0.029 ms (27–29 µs)
 --------------------------------------------------------------------------------------------------------
-  🏆 SPEEDUP                                          :  > 500,000x FASTER RETRIEVAL THROUGHPUT
-  ⚡ NETWORK OVERHEAD                                  :  0 ms (Zero TCP Sockets / In-Process Memory)
+  ⚡ ARCHITECTURAL GAIN                               :  Elimination of 3 separate TCP network hops & JSON IPC
+  ⚡ NETWORK OVERHEAD                                  :  0 ms (Direct In-Memory Buffer Access)
   ⚡ SERIALIZATION                                     :  0 ms (Zero JSON / Zero Protobuf IPC Churn)
-  ⚡ PEAK RAM CONSUMPTION                              :  < 50 MB (vs 4+ GB across 4 Python/Java Daemons)
+  ⚡ PEAK RAM CONSUMPTION                              :  < 50 MB (vs 4+ GB across 4 separate runtime daemons)
 ========================================================================================================
+*Note: The 27-29 µs retrieval metric measures in-process steady-state vector scan + CSR graph hops on local memory.
+The multi-second comparison includes inter-process TCP roundtrips, daemon connection handshakes, and JSON marshaling.
+For large-scale graphs (450k nodes / 700k edges), Glacier.Graph performs out-of-core CSR traversal in 7.51 ms.
+
 ```
 
 ```mermaid
