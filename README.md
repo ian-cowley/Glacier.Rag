@@ -24,7 +24,8 @@
 ========================================================================================================
 *Note: The 27-29 µs retrieval metric measures in-process steady-state vector scan + CSR graph hops on local memory.
 The multi-second comparison includes inter-process TCP roundtrips, daemon connection handshakes, and JSON marshaling.
-For large-scale graphs (450k nodes / 700k edges), Glacier.Graph performs out-of-core CSR traversal in 7.51 ms.
+The 27-29 µs figure was measured on a tiny corpus (2 chunks, 29 nodes, 15 edges); it is not a large-scale result.
+For reference, Glacier.Graph BFS over 450k nodes / 700k edges takes 7.51 ms RAM-resident (Forward Star) and 247.98 ms out-of-core CSR under a 256 KB RAM limit.
 
 ```
 
