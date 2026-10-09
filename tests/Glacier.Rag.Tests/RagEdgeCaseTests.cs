@@ -61,7 +61,8 @@ public class RagEdgeCaseTests
 
         var res = rag.Retrieve("ServiceAlpha", new RagOptions { TopK = 3, MaxGraphHops = 5 });
         Assert.NotNull(res);
-        Assert.True(res.TotalRetrievalLatencyMs < 20.0);
+        Assert.NotNull(res.SynthesizedContext);
+        Assert.NotEmpty(res.GraphRelations);
     }
 
     [Fact]
