@@ -10,18 +10,17 @@ public readonly record struct EntityTriplet(string Subject, string Predicate, st
 /// High-speed entity and relational triplet extractor for enterprise domain text.
 /// Extracts key concepts, types, APIs, acronyms, quoted terms, and multi-hop relationships for insertion into Glacier.Graph.
 /// </summary>
-public static class EntityExtractor
+public static partial class EntityExtractor
 {
-    // Regex for matching PascalCase types / interfaces (e.g. IAsyncEnumerable, LedgerAccountDto, SqlServer)
-    private static readonly Regex PascalCaseRegex = new(@"\b[I]?[A-Z][a-zA-Z0-9]{2,}\b", RegexOptions.Compiled);
+    [GeneratedRegex(@"\b[I]?[A-Z][a-zA-Z0-9]{2,}\b")]
+    private static partial Regex PascalCaseRegex();
 
-    // Regex for matching technical acronyms (e.g. SQL, HTTP, VRAM, SIMD, AVX, CSR, DTO, API)
-    private static readonly Regex AcronymRegex = new(@"\b[A-Z0-9_]{2,8}\b", RegexOptions.Compiled);
+    [GeneratedRegex(@"\b[A-Z0-9_]{2,8}\b")]
+    private static partial Regex AcronymRegex();
 
-    // Regex for matching quoted enterprise terms or phrases (e.g. "Customer Balance", "Account Table")
-    private static readonly Regex QuotedRegex = new(@"""([^""\r\n]{2,50})""|'([^'\r\n]{2,50})'", RegexOptions.Compiled);
+    [GeneratedRegex(@"""([^""\r\n]{2,50})""|'([^'\r\n]{2,50})'")]
+    private static partial Regex QuotedRegex();
 
-    // Common relational trigger phrases
     private static readonly (string Phrase, string Relation)[] RelationTriggers =
     [
         ("implements", "IMPLEMENTS"),
@@ -70,71 +69,83 @@ public static class EntityExtractor
         var triplets = new List<EntityTriplet>();
 
         if (string.IsNullOrWhiteSpace(text))
-            return (new List<string>(), triplets);
+            return ([], triplets);
 
-        var foundEntitiesInOrder = new List<string>();
+        var rawOccurrences = new List<(int Index, string Value)>(16);
 
         // 1. Extract quoted terms
-        var quotedMatches = QuotedRegex.Matches(text);
-        foreach (Match match in quotedMatches)
+        foreach (Match match in QuotedRegex().Matches(text))
         {
-            string val = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
-            val = val.Trim();
+            string val = (match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value).Trim();
             if (val.Length >= 2 && !IsCommonKeyword(val))
             {
-                if (entities.Add(val))
-                    foundEntitiesInOrder.Add(val);
+                rawOccurrences.Add((match.Index, val));
             }
         }
 
         // 2. Extract PascalCase entities
-        var pascalMatches = PascalCaseRegex.Matches(text);
-        foreach (Match match in pascalMatches)
+        foreach (Match match in PascalCaseRegex().Matches(text))
         {
             string val = match.Value;
             if (val.Length > 2 && !IsCommonKeyword(val))
             {
-                if (entities.Add(val))
-                    foundEntitiesInOrder.Add(val);
+                rawOccurrences.Add((match.Index, val));
             }
         }
 
         // 3. Extract uppercase technical acronyms
-        var acronymMatches = AcronymRegex.Matches(text);
-        foreach (Match match in acronymMatches)
+        foreach (Match match in AcronymRegex().Matches(text))
         {
             string val = match.Value;
             if (val.Length >= 2 && !IsCommonKeyword(val))
             {
-                if (entities.Add(val))
-                    foundEntitiesInOrder.Add(val);
+                rawOccurrences.Add((match.Index, val));
             }
         }
 
-        // 4. Extract relation triplets based on sentence proximity and triggers
+        rawOccurrences.Sort(static (a, b) => a.Index.CompareTo(b.Index));
+
+        var foundEntitiesInOrder = new List<string>(rawOccurrences.Count);
+        for (int i = 0; i < rawOccurrences.Count; i++)
+        {
+            if (entities.Add(rawOccurrences[i].Value))
+            {
+                foundEntitiesInOrder.Add(rawOccurrences[i].Value);
+            }
+        }
+
+        // 4. Extract relation triplets based on sentence proximity and word-bounded triggers
         var sentences = text.Split(['.', ';', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         foreach (var sentence in sentences)
         {
             foreach (var (phrase, rel) in RelationTriggers)
             {
-                int phraseIdx = sentence.IndexOf(phrase, StringComparison.OrdinalIgnoreCase);
-                if (phraseIdx > 0)
+                int searchFrom = 0;
+                while (searchFrom < sentence.Length)
                 {
-                    string left = sentence.Substring(0, phraseIdx);
-                    string right = sentence.Substring(phraseIdx + phrase.Length);
+                    int phraseIdx = sentence.IndexOf(phrase, searchFrom, StringComparison.OrdinalIgnoreCase);
+                    if (phraseIdx < 0) break;
 
-                    string? subj = FindClosestEntity(left, fromEnd: true);
-                    string? obj = FindClosestEntity(right, fromEnd: false);
-
-                    if (subj != null && obj != null && !subj.Equals(obj, StringComparison.OrdinalIgnoreCase))
+                    if (phraseIdx > 0 && IsWordBounded(sentence, phraseIdx, phrase.Length))
                     {
-                        triplets.Add(new EntityTriplet(subj, rel, obj));
+                        string left = sentence.Substring(0, phraseIdx);
+                        string right = sentence.Substring(phraseIdx + phrase.Length);
+
+                        string? subj = FindClosestEntity(left, fromEnd: true);
+                        string? obj = FindClosestEntity(right, fromEnd: false);
+
+                        if (subj != null && obj != null && !subj.Equals(obj, StringComparison.OrdinalIgnoreCase))
+                        {
+                            triplets.Add(new EntityTriplet(subj, rel, obj));
+                        }
                     }
+
+                    searchFrom = phraseIdx + phrase.Length;
                 }
             }
         }
 
-        // 5. Fallback: If entities co-occur in the same chunk, link them with RELATED_TO
+        // 5. Fallback: If entities co-occur in the same chunk, link adjacent document occurrences with RELATED_TO
         for (int i = 0; i < Math.Min(foundEntitiesInOrder.Count - 1, 6); i++)
         {
             string a = foundEntitiesInOrder[i];
@@ -145,46 +156,66 @@ public static class EntityExtractor
             }
         }
 
-        return (new List<string>(entities), triplets);
+        return (foundEntitiesInOrder, triplets);
+    }
+
+    private static bool IsWordBounded(string text, int index, int length)
+    {
+        bool leftOk = index == 0 || !char.IsLetterOrDigit(text[index - 1]);
+        int end = index + length;
+        bool rightOk = end >= text.Length || !char.IsLetterOrDigit(text[end]);
+        return leftOk && rightOk;
     }
 
     private static string? FindClosestEntity(string slice, bool fromEnd)
     {
-        // Check quoted first
-        var qMatches = QuotedRegex.Matches(slice);
-        if (qMatches.Count > 0)
+        string? bestVal = null;
+        int bestPos = fromEnd ? -1 : int.MaxValue;
+
+        foreach (Match m in QuotedRegex().Matches(slice))
         {
-            Match target = fromEnd ? qMatches[qMatches.Count - 1] : qMatches[0];
-            string val = (target.Groups[1].Success ? target.Groups[1].Value : target.Groups[2].Value).Trim();
-            if (!IsCommonKeyword(val)) return val;
+            string val = (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Trim();
+            if (val.Length < 2 || IsCommonKeyword(val)) continue;
+            int pos = fromEnd ? m.Index + m.Length : m.Index;
+            if ((fromEnd && pos > bestPos) || (!fromEnd && pos < bestPos))
+            {
+                bestPos = pos;
+                bestVal = val;
+            }
         }
 
-        // Check PascalCase
-        var pMatches = PascalCaseRegex.Matches(slice);
-        if (pMatches.Count > 0)
+        foreach (Match m in PascalCaseRegex().Matches(slice))
         {
-            Match target = fromEnd ? pMatches[pMatches.Count - 1] : pMatches[0];
-            string val = target.Value;
-            if (!IsCommonKeyword(val)) return val;
+            string val = m.Value;
+            if (val.Length <= 2 || IsCommonKeyword(val)) continue;
+            int pos = fromEnd ? m.Index + m.Length : m.Index;
+            if ((fromEnd && pos > bestPos) || (!fromEnd && pos < bestPos))
+            {
+                bestPos = pos;
+                bestVal = val;
+            }
         }
 
-        // Check Acronym
-        var aMatches = AcronymRegex.Matches(slice);
-        if (aMatches.Count > 0)
+        foreach (Match m in AcronymRegex().Matches(slice))
         {
-            Match target = fromEnd ? aMatches[aMatches.Count - 1] : aMatches[0];
-            string val = target.Value;
-            if (!IsCommonKeyword(val)) return val;
+            string val = m.Value;
+            if (val.Length < 2 || IsCommonKeyword(val)) continue;
+            int pos = fromEnd ? m.Index + m.Length : m.Index;
+            if ((fromEnd && pos > bestPos) || (!fromEnd && pos < bestPos))
+            {
+                bestPos = pos;
+                bestVal = val;
+            }
         }
 
-        return null;
+        return bestVal;
     }
 
     private static bool IsCommonKeyword(string word) => word switch
     {
-        "The" or "This" or "That" or "There" or "These" or "Those" or "When" or "Where" 
-        or "What" or "With" or "From" or "Then" or "Step" or "Example" or "Method" or "Below" 
-        or "AND" or "OR" or "NOT" or "FOR" or "THE" or "ALL" or "ANY" or "TRUE" or "FALSE" 
+        "The" or "This" or "That" or "There" or "These" or "Those" or "When" or "Where"
+        or "What" or "With" or "From" or "Then" or "Step" or "Example" or "Method" or "Below"
+        or "AND" or "OR" or "NOT" or "FOR" or "THE" or "ALL" or "ANY" or "TRUE" or "FALSE"
         or "NULL" or "GET" or "SET" or "USE" or "NEW" or "HOW" or "WHY" or "CAN" or "OUT" => true,
         _ => false
     };

@@ -92,12 +92,12 @@ AuditLogger records all privileged operations into SecurityAuditStore.
         Console.WriteLine("\n=== TOP SEMANTIC VECTOR EXCERPTS ===");
         foreach (var m in result.VectorMatches)
         {
-            Console.WriteLine($"  [Score: {m.Score:F4}] {m.Metadata.Replace('\n', ' ')}");
+            Console.WriteLine($"  [Score: {m.Score:F4}] {(m.Metadata ?? string.Empty).Replace('\n', ' ')}");
         }
 
         // 4. Check if Qwen 2.5 Standalone Model is available for live streaming
-        string modelPath = @"D:\lmstudio\models\Local\Qwen2.5-Coder-7B-Enterprise-GGUF\qwen2.5-7b-glacier-enterprise-q8_0.gguf";
-        if (File.Exists(modelPath))
+        string? modelPath = args.Length > 0 ? args[0] : Environment.GetEnvironmentVariable("GLACIER_RAG_MODEL_PATH");
+        if (!string.IsNullOrWhiteSpace(modelPath) && File.Exists(modelPath))
         {
             Console.WriteLine($"\n[3/3] Synthesizing Answer using Standalone Merged Model ({Path.GetFileName(modelPath)})...");
             string prompt = rag.BuildAugmentedPrompt(query, result);
@@ -110,7 +110,7 @@ AuditLogger records all privileged operations into SecurityAuditStore.
             var genResult = await session.GenerateAsync(
                 prompt,
                 options: new SamplingOptions { MaxTokens = 200, Temperature = 0.2f },
-                formatChat: true,
+                formatChat: false,
                 onToken: t => Console.Write(t)
             );
             Console.WriteLine("\n");
@@ -120,12 +120,12 @@ AuditLogger records all privileged operations into SecurityAuditStore.
         }
         else
         {
-            Console.WriteLine("\n[3/3] Synthesis Context Ready (Run with model on D: for live generation):");
+            Console.WriteLine("\n[3/3] Synthesis Context Ready (pass GGUF model path arg or GLACIER_RAG_MODEL_PATH for live generation):");
             Console.WriteLine(rag.BuildAugmentedPrompt(query, result));
         }
 
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine("\n[SUCCESS] Glacier.Rag demonstrated sub-15ms hybrid retrieval!");
+        Console.WriteLine("\n[SUCCESS] Glacier.Rag hybrid retrieval complete!");
         Console.ResetColor();
     }
 }

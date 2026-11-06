@@ -6,13 +6,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>preview</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <TieredPGO>true</TieredPGO>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <IsAotCompatible>true</IsAotCompatible>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Rag</PackageId>
-    <Version>1.0.3</Version>
+    <Version>1.2.0</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Pure C# .NET 10 in-process GraphRAG engine. Unifies dense SIMD vector search (Glacier.Vector) and zero-allocation CSR knowledge graph traversal (Glacier.Graph) directly with native LLM inference (Glacier.Inference) in a single memory space. Replaces Python LangChain, LlamaIndex, Chroma, and Neo4j.</Description>
@@ -29,9 +29,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Glacier.Vector" Version="1.0.7" />
-    <PackageReference Include="Glacier.Graph" Version="1.0.4" />
-    <PackageReference Include="Glacier.Inference" Version="1.2.19" />
-    <PackageReference Include="Glacier.Tensor" Version="1.0.9" />
+    <PackageReference Include="Glacier.Vector" Version="1.1.0" />
+    <PackageReference Include="Glacier.Graph" Version="1.1.0" />
+    <PackageReference Include="Glacier.Inference" Version="1.3.2" />
   </ItemGroup>
 </Project>

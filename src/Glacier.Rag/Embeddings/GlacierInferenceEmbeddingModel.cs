@@ -1,6 +1,7 @@
 namespace Glacier.Rag.Embeddings;
 
 using System;
+using System.Threading;
 using Glacier.Inference.Engine;
 
 /// <summary>
@@ -12,6 +13,7 @@ public sealed class GlacierInferenceEmbeddingModel : IEmbeddingModel
     private readonly InferenceSession _session;
     private readonly PoolingStrategy _poolingStrategy;
     private readonly bool _ownsSession;
+    private readonly Lock _sessionLock = new();
     private bool _disposed;
 
     public int Dimensions => _session.Weights.EmbeddingLength;
@@ -39,17 +41,24 @@ public sealed class GlacierInferenceEmbeddingModel : IEmbeddingModel
     public void GenerateEmbedding(ReadOnlySpan<char> text, Span<float> destination)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _session.ExtractEmbedding(text, destination, _poolingStrategy);
+        lock (_sessionLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _session.ExtractEmbedding(text, destination, _poolingStrategy);
+        }
     }
 
     public void Dispose()
     {
-        if (!_disposed)
+        lock (_sessionLock)
         {
-            _disposed = true;
-            if (_ownsSession)
+            if (!_disposed)
             {
-                _session.Dispose();
+                _disposed = true;
+                if (_ownsSession)
+                {
+                    _session.Dispose();
+                }
             }
         }
     }

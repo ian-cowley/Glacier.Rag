@@ -120,6 +120,15 @@ string answer = await rag.AskAsync(
 
 ---
 
+## 🆕 What's New in v1.2.0
+
+- **Graph-Expanded Reciprocal Rank Fusion (HybridGraphScorer)** — Unions dense vector hits with multi-hop CSR graph-discovered chunks (Entity -> ChunkId inverted index) so structurally connected evidence is surfaced even when lexically distant, with O(1) incremental chunk lookup and RagOptions.MinSimilarity filtering.
+- **Unique ChunkId Indexing & Resource Lifecycle Safety** — Keys VectorIndex by unique ChunkId (preventing duplicate boilerplate overwrites across documents), coordinates leaveStorageOpen: true and GraphStore.Dispose(), and synchronizes GlacierInferenceEmbeddingModel extraction under concurrent read queries.
+- **Native AOT [GeneratedRegex] Entity & Relation Extraction** — Word-boundary relational trigger matching, document-offset appearance ordering, and CRLF-aware DocumentChunker boundary validation.
+- **Native AOT & OIDC CI** — <IsAotCompatible>true</IsAotCompatible>, <TreatWarningsAsErrors>true</TreatWarningsAsErrors>, upgraded to Glacier.Vector 1.1.0, Glacier.Graph 1.1.0, and Glacier.Inference 1.3.2 with NuGet Trusted Publishing.
+
+---
+
 ## 🆕 What's New in v1.0.2
 
 - **`ReaderWriterLockSlim` replaces `Monitor`** — allows concurrent read parallelism, dramatically improving throughput under high simultaneous query load.

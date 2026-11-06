@@ -25,11 +25,16 @@ public sealed class DocumentChunk
 public static class DocumentChunker
 {
     public static List<DocumentChunk> ChunkText(
-        string documentId, 
-        string text, 
-        int maxChunkLength = 512, 
+        string documentId,
+        string text,
+        int maxChunkLength = 512,
         int overlap = 64)
     {
+        if (maxChunkLength <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxChunkLength), "Maximum chunk length must be positive.");
+        if (overlap < 0 || overlap >= maxChunkLength)
+            throw new ArgumentOutOfRangeException(nameof(overlap), "Overlap must be non-negative and strictly less than maxChunkLength.");
+
         if (string.IsNullOrEmpty(text)) return [];
 
         var chunks = new List<DocumentChunk>();
@@ -78,30 +83,33 @@ public static class DocumentChunker
     private static int FindNaturalBreak(string text, int start, int maxLen)
     {
         int limit = start + maxLen;
+        int minBreak = start + (maxLen / 2);
 
-        // 1. Look for double newline (paragraph boundary)
-        for (int i = limit - 1; i >= start + (maxLen / 2); i--)
+        // 1. Look for double newline (paragraph boundary: \r\n\r\n or \n\n)
+        for (int i = limit - 1; i >= minBreak; i--)
         {
+            if (i + 3 < text.Length && text[i] == '\r' && text[i + 1] == '\n' && text[i + 2] == '\r' && text[i + 3] == '\n')
+                return Math.Min(limit, i + 4);
             if (i + 1 < text.Length && text[i] == '\n' && text[i + 1] == '\n')
-                return i + 2;
+                return Math.Min(limit, i + 2);
         }
 
         // 2. Look for single newline
-        for (int i = limit - 1; i >= start + (maxLen / 2); i--)
+        for (int i = limit - 1; i >= minBreak; i--)
         {
             if (text[i] == '\n')
                 return i + 1;
         }
 
         // 3. Look for period + space (sentence boundary)
-        for (int i = limit - 1; i >= start + (maxLen / 2); i--)
+        for (int i = limit - 1; i >= minBreak; i--)
         {
             if (text[i] == '.' && (i + 1 == text.Length || char.IsWhiteSpace(text[i + 1])))
                 return i + 1;
         }
 
         // 4. Look for whitespace
-        for (int i = limit - 1; i >= start + (maxLen / 2); i--)
+        for (int i = limit - 1; i >= minBreak; i--)
         {
             if (char.IsWhiteSpace(text[i]))
                 return i + 1;

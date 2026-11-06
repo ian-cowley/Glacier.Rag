@@ -8,7 +8,8 @@ using Glacier.Vector.Index;
 
 /// <summary>
 /// Authentic hybrid retrieval reranker evaluating dense vector similarity,
-/// knowledge graph shortest-path hop proximity, and Reciprocal Rank Fusion (RRF).
+/// knowledge graph shortest-path hop proximity, and Reciprocal Rank Fusion (RRF)
+/// across the union of dense vector matches and graph-expanded candidate chunks.
 /// </summary>
 public static class HybridGraphScorer
 {
@@ -28,30 +29,55 @@ public static class HybridGraphScorer
         GraphStore graphStore,
         GraphSearch graphSearch,
         float denseWeight = 0.5f,
-        int kSmoothing = 60)
+        int kSmoothing = 60,
+        IReadOnlyCollection<string>? graphCandidateIds = null,
+        int maxResults = 0)
     {
-        if (vectorMatches.Length == 0) return new List<ScoredChunk>();
+        int extraCount = graphCandidateIds?.Count ?? 0;
+        if (vectorMatches.Length == 0 && extraCount == 0)
+            return [];
 
-        var scoredList = new List<ScoredChunk>(vectorMatches.Length);
+        var candidateIds = new List<string>(vectorMatches.Length + extraCount);
+        var seenCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // 1. Compute Dense Ranks
-        var denseRanks = new Dictionary<string, int>(vectorMatches.Length, StringComparer.Ordinal);
+        // 1. Compute Dense Ranks & Scores
+        var denseRanks = new Dictionary<string, int>(vectorMatches.Length, StringComparer.OrdinalIgnoreCase);
+        var denseScores = new Dictionary<string, float>(vectorMatches.Length, StringComparer.OrdinalIgnoreCase);
+
         for (int r = 0; r < vectorMatches.Length; r++)
         {
-            if (!string.IsNullOrEmpty(vectorMatches[r].Metadata))
+            string id = vectorMatches[r].Metadata ?? string.Empty;
+            if (string.IsNullOrEmpty(id)) continue;
+
+            if (seenCandidates.Add(id))
             {
-                denseRanks[vectorMatches[r].Metadata] = r + 1;
+                candidateIds.Add(id);
+                denseRanks[id] = r + 1;
+                denseScores[id] = vectorMatches[r].Score;
             }
         }
 
-        // 2. Compute Graph Relevance Scores for each chunk
-        var graphScores = new Dictionary<string, (float Score, List<GraphRelation> Relations)>(vectorMatches.Length, StringComparer.Ordinal);
-        foreach (var match in vectorMatches)
+        if (graphCandidateIds != null)
         {
-            string contentOrId = match.Metadata ?? string.Empty;
-            if (!chunkEntities.TryGetValue(contentOrId, out var ents))
+            foreach (var gId in graphCandidateIds)
             {
-                graphScores[contentOrId] = (0f, new List<GraphRelation>());
+                if (!string.IsNullOrEmpty(gId) && seenCandidates.Add(gId))
+                {
+                    candidateIds.Add(gId);
+                }
+            }
+        }
+
+        if (candidateIds.Count == 0)
+            return [];
+
+        // 2. Compute Graph Relevance Scores for every candidate chunk (dense union graph-expanded)
+        var graphScores = new Dictionary<string, (float Score, List<GraphRelation> Relations)>(candidateIds.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var candidateId in candidateIds)
+        {
+            if (!chunkEntities.TryGetValue(candidateId, out var ents) || queryEntities.Count == 0)
+            {
+                graphScores[candidateId] = (0f, []);
                 continue;
             }
 
@@ -64,7 +90,7 @@ public static class HybridGraphScorer
                 {
                     if (qEnt.Equals(dEnt, StringComparison.OrdinalIgnoreCase))
                     {
-                        gScore += 1.0f; // Direct entity hit
+                        gScore += 1.0f;
                         continue;
                     }
 
@@ -74,7 +100,7 @@ public static class HybridGraphScorer
                         path = graphSearch.FindShortestPath(dEnt, qEnt);
                     }
 
-                    if (path.Count > 1 && path.Count <= 4) // within 3 hops
+                    if (path.Count > 1 && path.Count <= 4)
                     {
                         int hops = path.Count - 1;
                         gScore += 1.0f / (1.0f + hops);
@@ -87,35 +113,54 @@ public static class HybridGraphScorer
                     }
                 }
             }
-            graphScores[contentOrId] = (gScore, rels);
+
+            graphScores[candidateId] = (gScore, rels);
         }
 
-        // 3. Compute Graph Ranks
+        // 3. Compute Graph Ranks (chunks with 0 graph score share worst rank = candidateIds.Count + 1)
         var sortedByGraph = new List<KeyValuePair<string, (float Score, List<GraphRelation> Relations)>>(graphScores);
-        sortedByGraph.Sort((a, b) => b.Value.Score.CompareTo(a.Value.Score));
-        var graphRanks = new Dictionary<string, int>(sortedByGraph.Count, StringComparer.Ordinal);
+        sortedByGraph.Sort(static (a, b) => b.Value.Score.CompareTo(a.Value.Score));
+
+        int missingRank = candidateIds.Count + 1;
+        var graphRanks = new Dictionary<string, int>(sortedByGraph.Count, StringComparer.OrdinalIgnoreCase);
         for (int r = 0; r < sortedByGraph.Count; r++)
         {
-            graphRanks[sortedByGraph[r].Key] = r + 1;
+            if (sortedByGraph[r].Value.Score > 0f)
+            {
+                graphRanks[sortedByGraph[r].Key] = r + 1;
+            }
         }
 
         // 4. Reciprocal Rank Fusion (RRF)
         float graphWeight = 1.0f - denseWeight;
-        foreach (var match in vectorMatches)
+        var scoredList = new List<ScoredChunk>(candidateIds.Count);
+
+        foreach (var candidateId in candidateIds)
         {
-            string contentOrId = match.Metadata ?? string.Empty;
-            int rDense = denseRanks.GetValueOrDefault(contentOrId, vectorMatches.Length + 1);
-            int rGraph = graphRanks.GetValueOrDefault(contentOrId, vectorMatches.Length + 1);
+            int rDense = denseRanks.GetValueOrDefault(candidateId, missingRank);
+            int rGraph = graphRanks.GetValueOrDefault(candidateId, missingRank);
 
             float rrfScore = (denseWeight / (kSmoothing + rDense)) + (graphWeight / (kSmoothing + rGraph));
-            var (gScore, rels) = graphScores.GetValueOrDefault(contentOrId, (0f, new List<GraphRelation>()));
+            float dScore = denseScores.GetValueOrDefault(candidateId, 0f);
+            var (gScore, rels) = graphScores[candidateId];
 
-            string content = chunkContentById.TryGetValue(contentOrId, out var c) ? c : contentOrId;
-            scoredList.Add(new ScoredChunk(contentOrId, content, match.Score, gScore, rrfScore, rels));
+            string content = chunkContentById.TryGetValue(candidateId, out var c) ? c : candidateId;
+            scoredList.Add(new ScoredChunk(candidateId, content, dScore, gScore, rrfScore, rels));
         }
 
-        // Sort descending by hybrid RRF score
-        scoredList.Sort((a, b) => b.HybridScore.CompareTo(a.HybridScore));
+        scoredList.Sort(static (a, b) =>
+        {
+            int cmp = b.HybridScore.CompareTo(a.HybridScore);
+            if (cmp != 0) return cmp;
+            cmp = b.GraphScore.CompareTo(a.GraphScore);
+            return cmp != 0 ? cmp : b.DenseScore.CompareTo(a.DenseScore);
+        });
+
+        if (maxResults > 0 && scoredList.Count > maxResults)
+        {
+            scoredList.RemoveRange(maxResults, scoredList.Count - maxResults);
+        }
+
         return scoredList;
     }
 }
