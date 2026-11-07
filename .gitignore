@@ -43,3 +43,8 @@ appsettings*.json
 # Scratch
 brain/
 scratch/
+
+bin/
+obj/
+*.tmp
+!.env.example

@@ -2,6 +2,8 @@ namespace Glacier.Rag.Engine;
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Glacier.Graph.Kernels;
 using Glacier.Graph.Storage;
 using Glacier.Graph.Traversal;
 using Glacier.Vector.Index;
@@ -132,6 +134,170 @@ public static class HybridGraphScorer
         }
 
         // 4. Reciprocal Rank Fusion (RRF)
+        float graphWeight = 1.0f - denseWeight;
+        var scoredList = new List<ScoredChunk>(candidateIds.Count);
+
+        foreach (var candidateId in candidateIds)
+        {
+            int rDense = denseRanks.GetValueOrDefault(candidateId, missingRank);
+            int rGraph = graphRanks.GetValueOrDefault(candidateId, missingRank);
+
+            float rrfScore = (denseWeight / (kSmoothing + rDense)) + (graphWeight / (kSmoothing + rGraph));
+            float dScore = denseScores.GetValueOrDefault(candidateId, 0f);
+            var (gScore, rels) = graphScores[candidateId];
+
+            string content = chunkContentById.TryGetValue(candidateId, out var c) ? c : candidateId;
+            scoredList.Add(new ScoredChunk(candidateId, content, dScore, gScore, rrfScore, rels));
+        }
+
+        scoredList.Sort(static (a, b) =>
+        {
+            int cmp = b.HybridScore.CompareTo(a.HybridScore);
+            if (cmp != 0) return cmp;
+            cmp = b.GraphScore.CompareTo(a.GraphScore);
+            return cmp != 0 ? cmp : b.DenseScore.CompareTo(a.DenseScore);
+        });
+
+        if (maxResults > 0 && scoredList.Count > maxResults)
+        {
+            scoredList.RemoveRange(maxResults, scoredList.Count - maxResults);
+        }
+
+        return scoredList;
+    }
+
+    /// <summary>
+    /// High-performance HippoRAG hybrid retrieval reranker.
+    /// Executes a single Personalized PageRank pass over query seed entities,
+    /// scoring all candidate document chunks directly via constituent entity PPR scores,
+    /// followed by Reciprocal Rank Fusion (RRF) with dense vector scores.
+    /// </summary>
+    public static List<ScoredChunk> ScoreAndRerankHippoRag(
+        SearchResult[] vectorMatches,
+        IReadOnlySet<string> queryEntities,
+        IReadOnlyDictionary<string, List<string>> chunkEntities,
+        IReadOnlyDictionary<string, string> chunkContentById,
+        CsrGraphStore csrStore,
+        float denseWeight = 0.5f,
+        int kSmoothing = 60,
+        IReadOnlyCollection<string>? graphCandidateIds = null,
+        int maxResults = 0,
+        float alpha = 0.85f,
+        int pprIterations = 20)
+    {
+        ArgumentNullException.ThrowIfNull(vectorMatches);
+        ArgumentNullException.ThrowIfNull(queryEntities);
+        ArgumentNullException.ThrowIfNull(chunkEntities);
+        ArgumentNullException.ThrowIfNull(chunkContentById);
+        ArgumentNullException.ThrowIfNull(csrStore);
+
+        int extraCount = graphCandidateIds?.Count ?? 0;
+        if (vectorMatches.Length == 0 && extraCount == 0)
+            return [];
+
+        var candidateIds = new List<string>(vectorMatches.Length + extraCount);
+        var seenCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. Compute Dense Ranks & Scores
+        var denseRanks = new Dictionary<string, int>(vectorMatches.Length, StringComparer.OrdinalIgnoreCase);
+        var denseScores = new Dictionary<string, float>(vectorMatches.Length, StringComparer.OrdinalIgnoreCase);
+
+        for (int r = 0; r < vectorMatches.Length; r++)
+        {
+            string id = vectorMatches[r].Metadata ?? string.Empty;
+            if (string.IsNullOrEmpty(id)) continue;
+
+            if (seenCandidates.Add(id))
+            {
+                candidateIds.Add(id);
+                denseRanks[id] = r + 1;
+                denseScores[id] = vectorMatches[r].Score;
+            }
+        }
+
+        if (graphCandidateIds != null)
+        {
+            foreach (var gId in graphCandidateIds)
+            {
+                if (!string.IsNullOrEmpty(gId) && seenCandidates.Add(gId))
+                {
+                    candidateIds.Add(gId);
+                }
+            }
+        }
+
+        if (candidateIds.Count == 0)
+            return [];
+
+        // 2. Personalized PageRank across Query Seed Entities
+        var seedEntities = new List<int>(queryEntities.Count);
+        foreach (var qEnt in queryEntities)
+        {
+            if (csrStore.TryGetInternalId(qEnt, out int internalId))
+            {
+                seedEntities.Add(internalId);
+            }
+        }
+
+        float[] pprScores = new float[csrStore.NodeCount + 1];
+        if (seedEntities.Count > 0 && csrStore.NodeCount > 0)
+        {
+            CsrKernels.PersonalizedPageRank(
+                csrStore,
+                CollectionsMarshal.AsSpan(seedEntities),
+                ReadOnlySpan<float>.Empty,
+                pprScores,
+                alpha: alpha,
+                maxIterations: pprIterations);
+        }
+
+        // 3. Compute Graph Relevance Scores for candidate chunks via constituent entity PPR scores
+        var graphScores = new Dictionary<string, (float Score, List<GraphRelation> Relations)>(candidateIds.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var candidateId in candidateIds)
+        {
+            if (!chunkEntities.TryGetValue(candidateId, out var ents) || ents.Count == 0 || seedEntities.Count == 0)
+            {
+                graphScores[candidateId] = (0f, []);
+                continue;
+            }
+
+            float gScore = 0f;
+            var rels = new List<GraphRelation>();
+
+            foreach (var dEnt in ents)
+            {
+                if (csrStore.TryGetInternalId(dEnt, out int dInternalId) && dInternalId < pprScores.Length)
+                {
+                    float p = pprScores[dInternalId];
+                    if (p > 0f)
+                    {
+                        gScore += p;
+                        rels.Add(new GraphRelation
+                        {
+                            Source = "QUERY",
+                            Target = dEnt,
+                            Relation = $"PPR_{p:F5}"
+                        });
+                    }
+                }
+            }
+
+            graphScores[candidateId] = (gScore, rels);
+        }
+
+        // 4. Compute Graph Ranks
+        var sortedByGraph = new List<KeyValuePair<string, (float Score, List<GraphRelation> Relations)>>(graphScores);
+        sortedByGraph.Sort(static (a, b) => b.Value.Score.CompareTo(a.Value.Score));
+
+        int missingRank = candidateIds.Count + 1;
+        var graphRanks = new Dictionary<string, int>(sortedByGraph.Count, StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < sortedByGraph.Count; i++)
+        {
+            var kv = sortedByGraph[i];
+            graphRanks[kv.Key] = kv.Value.Score > 0f ? (i + 1) : missingRank;
+        }
+
+        // 5. Reciprocal Rank Fusion (RRF)
         float graphWeight = 1.0f - denseWeight;
         var scoredList = new List<ScoredChunk>(candidateIds.Count);
 
