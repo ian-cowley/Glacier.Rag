@@ -108,31 +108,7 @@ public sealed class GraphRagEngine : IDisposable
                 // 1. Vector Indexing keyed by unique ChunkId (prevents duplicate-boilerplate overwrites)
                 _embeddingModel.GenerateEmbedding(chunk.Content, embBuffer);
                 _vectorIndex.Add(embBuffer, chunk.ChunkId);
-                _chunksById[chunk.ChunkId] = chunk;
-                _chunkContentById[chunk.ChunkId] = chunk.Content;
-
-                // 2. Entity & Relation Graph Indexing + Inverted Entity -> ChunkId map
-                var (entities, triplets) = EntityExtractor.Extract(chunk.Content);
-                _docEntities[chunk.ChunkId] = entities;
-
-                foreach (var entity in entities)
-                {
-                    _graphStore.AddNode(entity, docId);
-                    if (!_entityToChunkIds.TryGetValue(entity, out var chunkList))
-                    {
-                        chunkList = new List<string>(4);
-                        _entityToChunkIds[entity] = chunkList;
-                    }
-                    if (!chunkList.Contains(chunk.ChunkId))
-                    {
-                        chunkList.Add(chunk.ChunkId);
-                    }
-                }
-
-                foreach (var t in triplets)
-                {
-                    _graphStore.AddEdge(t.Subject, t.Object, t.Predicate);
-                }
+                IndexChunkGraphAndMetadata(docId, chunk);
             }
         }
         finally
@@ -144,12 +120,140 @@ public sealed class GraphRagEngine : IDisposable
     }
 
     /// <summary>
+    /// Asynchronously ingests and indexes an entire document, forwarding <paramref name="cancellationToken"/>
+    /// to asynchronous <see cref="OpenAiEmbeddingModel"/> calls without holding the write lock across I/O.
+    /// </summary>
+    public async Task<int> IndexDocumentAsync(
+        string docId,
+        string text,
+        IDictionary<string, string>? metadata = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var chunks = DocumentChunker.ChunkText(docId, text);
+        var vectors = new float[chunks.Count][];
+
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_embeddingModel is OpenAiEmbeddingModel openAi)
+            {
+                vectors[i] = await openAi.GenerateEmbeddingAsync(chunks[i].Content, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                var buf = new float[_embeddingModel.Dimensions];
+                _embeddingModel.GenerateEmbedding(chunks[i].Content, buf);
+                vectors[i] = buf;
+            }
+        }
+
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _rwLock.EnterWriteLock();
+        try
+        {
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                var chunk = chunks[i];
+                if (metadata != null)
+                {
+                    foreach (var kv in metadata) chunk.Metadata[kv.Key] = kv.Value;
+                }
+
+                _vectorIndex.Add(vectors[i], chunk.ChunkId);
+                IndexChunkGraphAndMetadata(docId, chunk);
+            }
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
+
+        return chunks.Count;
+    }
+
+    private void IndexChunkGraphAndMetadata(string docId, DocumentChunk chunk)
+    {
+        _chunksById[chunk.ChunkId] = chunk;
+        _chunkContentById[chunk.ChunkId] = chunk.Content;
+
+        // 2. Entity & Relation Graph Indexing + Inverted Entity -> ChunkId map
+        var (entities, triplets) = EntityExtractor.Extract(chunk.Content);
+        _docEntities[chunk.ChunkId] = entities;
+
+        foreach (var entity in entities)
+        {
+            _graphStore.AddNode(entity, docId);
+            if (!_entityToChunkIds.TryGetValue(entity, out var chunkList))
+            {
+                chunkList = new List<string>(4);
+                _entityToChunkIds[entity] = chunkList;
+            }
+            if (!chunkList.Contains(chunk.ChunkId))
+            {
+                chunkList.Add(chunk.ChunkId);
+            }
+        }
+
+        foreach (var t in triplets)
+        {
+            _graphStore.AddEdge(t.Subject, t.Object, t.Predicate);
+        }
+    }
+
+    /// <summary>
     /// Executes hybrid retrieval combining dense vector search and multi-hop graph hops with authentic RRF scoring.
     /// </summary>
     public HybridRetrievalResult Retrieve(string query, RagOptions? options = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
+        int topK = options?.TopK ?? 3;
+        float[]? queryEmb = null;
+        if (topK > 0)
+        {
+            queryEmb = new float[_embeddingModel.Dimensions];
+            _embeddingModel.GenerateEmbedding(query, queryEmb);
+        }
+
+        return RetrieveWithQueryEmbedding(query, queryEmb, options);
+    }
+
+    /// <summary>
+    /// Asynchronously executes hybrid retrieval, forwarding <paramref name="cancellationToken"/>
+    /// to asynchronous <see cref="OpenAiEmbeddingModel"/> calls without holding the read lock across I/O.
+    /// </summary>
+    public async Task<HybridRetrievalResult> RetrieveAsync(
+        string query,
+        RagOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        int topK = options?.TopK ?? 3;
+        float[]? queryEmb = null;
+        if (topK > 0)
+        {
+            if (_embeddingModel is OpenAiEmbeddingModel openAi)
+            {
+                queryEmb = await openAi.GenerateEmbeddingAsync(query, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                queryEmb = new float[_embeddingModel.Dimensions];
+                _embeddingModel.GenerateEmbedding(query, queryEmb);
+            }
+        }
+
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return RetrieveWithQueryEmbedding(query, queryEmb, options);
+    }
+
+    private HybridRetrievalResult RetrieveWithQueryEmbedding(string query, float[]? queryEmb, RagOptions? options)
+    {
         int topK = options?.TopK ?? 3;
         int maxHops = options?.MaxGraphHops ?? 2;
         float minSimilarity = options?.MinSimilarity ?? 0.0f;
@@ -160,14 +264,12 @@ public sealed class GraphRagEngine : IDisposable
             // 1. Dense Vector Search + MinSimilarity threshold filtering
             var swVec = Stopwatch.StartNew();
             SearchResult[] rawVectorResults;
-            if (topK <= 0)
+            if (topK <= 0 || queryEmb == null)
             {
                 rawVectorResults = [];
             }
             else
             {
-                float[] queryEmb = new float[_embeddingModel.Dimensions];
-                _embeddingModel.GenerateEmbedding(query, queryEmb);
                 var candidates = _vectorIndex.Search(queryEmb, topK: topK);
                 if (minSimilarity > 0.0f)
                 {
@@ -358,7 +460,7 @@ public sealed class GraphRagEngine : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(session);
 
-        var retrieval = Retrieve(query, options);
+        var retrieval = await RetrieveAsync(query, options, ct).ConfigureAwait(false);
         string prompt = BuildAugmentedPrompt(query, retrieval);
 
         var samplingOptions = new SamplingOptions
