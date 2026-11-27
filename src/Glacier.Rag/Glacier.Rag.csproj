@@ -12,7 +12,8 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Rag</PackageId>
-    <Version>1.4.2</Version>
+    <Version>1.4.3</Version>
+    <PackageReleaseNotes>v1.4.3: Cached CSR HippoRAG PPR reranking, numeric acronym false-positive guard, chunk overlap floor, and aligned Graph/Inference/Vector deps.</PackageReleaseNotes>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Pure C# .NET 10 in-process GraphRAG engine. Unifies dense SIMD vector search (Glacier.Vector) and zero-allocation CSR knowledge graph traversal (Glacier.Graph) directly with native LLM inference (Glacier.Inference) in a single memory space. Replaces Python LangChain, LlamaIndex, Chroma, and Neo4j.</Description>
@@ -32,20 +33,20 @@
     <ProjectReference Include="../../../Glacier.Vector/src/Glacier.Vector/Glacier.Vector.csproj" />
   </ItemGroup>
   <ItemGroup Condition="!Exists('../../../Glacier.Vector/src/Glacier.Vector/Glacier.Vector.csproj') or '$(UseLocalProjectReferences)' == 'false'">
-    <PackageReference Include="Glacier.Vector" Version="1.2.0" />
+    <PackageReference Include="Glacier.Vector" Version="1.3.1" />
   </ItemGroup>
 
   <ItemGroup Condition="Exists('../../../Glacier.Graph/src/Glacier.Graph/Glacier.Graph.csproj') and '$(UseLocalProjectReferences)' != 'false'">
     <ProjectReference Include="../../../Glacier.Graph/src/Glacier.Graph/Glacier.Graph.csproj" />
   </ItemGroup>
   <ItemGroup Condition="!Exists('../../../Glacier.Graph/src/Glacier.Graph/Glacier.Graph.csproj') or '$(UseLocalProjectReferences)' == 'false'">
-    <PackageReference Include="Glacier.Graph" Version="1.2.0" />
+    <PackageReference Include="Glacier.Graph" Version="1.2.1" />
   </ItemGroup>
 
   <ItemGroup Condition="Exists('../../../Glacier.Inference/src/Glacier.Inference/Glacier.Inference.csproj') and '$(UseLocalProjectReferences)' != 'false'">
     <ProjectReference Include="../../../Glacier.Inference/src/Glacier.Inference/Glacier.Inference.csproj" />
   </ItemGroup>
   <ItemGroup Condition="!Exists('../../../Glacier.Inference/src/Glacier.Inference/Glacier.Inference.csproj') or '$(UseLocalProjectReferences)' == 'false'">
-    <PackageReference Include="Glacier.Inference" Version="1.8.2" />
+    <PackageReference Include="Glacier.Inference" Version="1.10.1" />
   </ItemGroup>
 </Project>

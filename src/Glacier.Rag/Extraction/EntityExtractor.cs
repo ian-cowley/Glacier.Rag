@@ -15,7 +15,7 @@ public static partial class EntityExtractor
     [GeneratedRegex(@"\b[I]?[A-Z][a-zA-Z0-9]{2,}\b")]
     private static partial Regex PascalCaseRegex();
 
-    [GeneratedRegex(@"\b[A-Z0-9_]{2,8}\b")]
+    [GeneratedRegex(@"\b(?=[A-Z0-9_]*[A-Z])[A-Z0-9_]{2,8}\b")]
     private static partial Regex AcronymRegex();
 
     [GeneratedRegex(@"""([^""\r\n]{2,50})""|'([^'\r\n]{2,50})'")]

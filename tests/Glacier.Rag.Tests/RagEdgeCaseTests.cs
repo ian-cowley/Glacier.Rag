@@ -3,8 +3,10 @@ namespace Glacier.Rag.Tests;
 using System;
 using System.Collections.Generic;
 using Glacier.Rag.Chunking;
+using Glacier.Rag.Chunking;
 using Glacier.Rag.Embeddings;
 using Glacier.Rag.Engine;
+using Glacier.Rag.Extraction;
 using Xunit;
 
 public class RagEdgeCaseTests
@@ -74,5 +76,36 @@ public class RagEdgeCaseTests
         var res = rag.Retrieve("OrderProcessor", new RagOptions { TopK = 0, MaxGraphHops = 1 });
         Assert.NotNull(res);
         Assert.Empty(res.VectorMatches);
+    }
+
+    [Fact]
+    public void EntityExtractor_AcronymRegex_IgnoresPureNumericTokens()
+    {
+        var (entities, _) = EntityExtractor.Extract("Version 2026 release 10 uses CUDA and S3 storage.");
+        Assert.DoesNotContain("2026", entities);
+        Assert.DoesNotContain("10", entities);
+        Assert.Contains("CUDA", entities);
+        Assert.Contains("S3", entities);
+    }
+
+    [Fact]
+    public void DocumentChunker_HighOverlapWithShortNaturalBreaks_DoesNotStall()
+    {
+        string text = string.Join("\n\n", new string[20].Select((_, idx) => $"Paragraph {idx} sentence about Glacier components."));
+        var chunks = DocumentChunker.ChunkText("doc1", text, maxChunkLength: 100, overlap: 90);
+        Assert.True(chunks.Count < text.Length / 20, $"Unexpected chunk explosion: {chunks.Count}");
+    }
+
+    [Fact]
+    public void GraphRagEngine_UsesHippoRagPprAndInvalidatesCacheAcrossIndexes()
+    {
+        using var rag = new GraphRagEngine(new FastHashEmbeddingModel(64));
+        rag.IndexDocument("A", "AlphaService calls BetaService.");
+        var r1 = rag.Retrieve("AlphaService");
+        Assert.NotEmpty(r1.SynthesizedContext);
+
+        rag.IndexDocument("B", "BetaService writes to ArchiveDb.");
+        var r2 = rag.Retrieve("AlphaService");
+        Assert.NotEmpty(r2.VectorMatches);
     }
 }

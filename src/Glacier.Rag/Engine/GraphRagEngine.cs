@@ -44,6 +44,10 @@ public sealed class GraphRagEngine : IDisposable
     private readonly Dictionary<string, List<string>> _docEntities = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, List<string>> _entityToChunkIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly ReaderWriterLockSlim _rwLock = new(LockRecursionPolicy.SupportsRecursion);
+    private readonly object _csrSync = new();
+    private CsrGraphStore? _csrStore;
+    private string? _csrTempPath;
+    private volatile bool _csrDirty = true;
     private bool _disposed;
 
     public int IndexedChunksCount
@@ -109,6 +113,7 @@ public sealed class GraphRagEngine : IDisposable
                 _embeddingModel.GenerateEmbedding(chunk.Content, embBuffer);
                 _vectorIndex.Add(embBuffer, chunk.ChunkId);
                 IndexChunkGraphAndMetadata(docId, chunk);
+                _csrDirty = true;
             }
         }
         finally
@@ -164,6 +169,7 @@ public sealed class GraphRagEngine : IDisposable
 
                 _vectorIndex.Add(vectors[i], chunk.ChunkId);
                 IndexChunkGraphAndMetadata(docId, chunk);
+                _csrDirty = true;
             }
         }
         finally
@@ -368,20 +374,38 @@ public sealed class GraphRagEngine : IDisposable
             }
             swGraph.Stop();
 
-            // 4. Hybrid Graph-Dense Joint Scoring via Reciprocal Rank Fusion (RRF) with zero O(N) map copy
-            var scoredChunks = topK > 0
-                ? HybridGraphScorer.ScoreAndRerank(
-                    rawVectorResults,
-                    queryEntitySet,
-                    _docEntities,
-                    _chunkContentById,
-                    _graphStore,
-                    _graphSearch,
-                    denseWeight: 0.5f,
-                    kSmoothing: 60,
-                    graphCandidateIds: graphCandidateIds,
-                    maxResults: topK)
-                : [];
+            // 4. Hybrid Graph-Dense Joint Scoring via HippoRAG Personalized PageRank over compiled CSR graph
+            List<HybridGraphScorer.ScoredChunk> scoredChunks;
+            if (topK > 0)
+            {
+                var csr = GetOrCompileCsrStore();
+                scoredChunks = csr != null && _graphStore.EdgeCount > 0 && queryEntitySet.Count > 0
+                    ? HybridGraphScorer.ScoreAndRerankHippoRag(
+                        rawVectorResults,
+                        queryEntitySet,
+                        _docEntities,
+                        _chunkContentById,
+                        csr,
+                        denseWeight: 0.5f,
+                        kSmoothing: 60,
+                        graphCandidateIds: graphCandidateIds,
+                        maxResults: topK)
+                    : HybridGraphScorer.ScoreAndRerank(
+                        rawVectorResults,
+                        queryEntitySet,
+                        _docEntities,
+                        _chunkContentById,
+                        _graphStore,
+                        _graphSearch,
+                        denseWeight: 0.5f,
+                        kSmoothing: 60,
+                        graphCandidateIds: graphCandidateIds,
+                        maxResults: topK);
+            }
+            else
+            {
+                scoredChunks = [];
+            }
 
             // Map VectorMatches metadata to human-readable chunk content for callers
             var externalVectorMatches = new SearchResult[rawVectorResults.Length];
@@ -493,12 +517,62 @@ public sealed class GraphRagEngine : IDisposable
                $"<|im_start|>assistant\n";
     }
 
+    private CsrGraphStore? GetOrCompileCsrStore()
+    {
+        if (_graphStore.NodeCount == 0)
+            return null;
+
+        var cached = _csrStore;
+        if (cached != null && !_csrDirty)
+            return cached;
+
+        lock (_csrSync)
+        {
+            if (_csrStore != null && !_csrDirty)
+                return _csrStore;
+
+            var oldStore = _csrStore;
+            string? oldPath = _csrTempPath;
+            _csrStore = null;
+            _csrTempPath = null;
+            oldStore?.Dispose();
+            if (oldPath != null)
+            {
+                try { System.IO.File.Delete(oldPath); } catch { }
+            }
+
+            if (_graphStore.NodeCount == 0)
+            {
+                _csrDirty = false;
+                return null;
+            }
+
+            string newPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"glacier_rag_{Guid.NewGuid():N}.gcsr");
+            CsrGraphCompiler.CompileFromForwardStar(_graphStore, newPath);
+            var compiled = new CsrGraphStore(newPath, useMemoryMapping: false);
+            _csrStore = compiled;
+            _csrTempPath = newPath;
+            _csrDirty = false;
+            return compiled;
+        }
+    }
+
     public void Dispose()
     {
         if (!_disposed)
         {
             _disposed = true;
             _rwLock.Dispose();
+            lock (_csrSync)
+            {
+                _csrStore?.Dispose();
+                _csrStore = null;
+                if (_csrTempPath != null)
+                {
+                    try { System.IO.File.Delete(_csrTempPath); } catch { }
+                    _csrTempPath = null;
+                }
+            }
             _embeddingModel.Dispose();
             _vectorIndex.Dispose();
             _vectorStorage.Dispose();

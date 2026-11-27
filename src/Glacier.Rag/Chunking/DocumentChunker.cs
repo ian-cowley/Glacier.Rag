@@ -72,8 +72,9 @@ public static class DocumentChunker
 
             if (currentPos + take >= text.Length) break;
 
-            // Advance by (take - overlap)
-            int step = Math.Max(1, take - overlap);
+            // Advance by (take - effectiveOverlap), capping overlap at half of take when naturalBreak shrinks a chunk.
+            int effectiveOverlap = Math.Min(overlap, take / 2);
+            int step = Math.Max(1, take - effectiveOverlap);
             currentPos += step;
         }
 
