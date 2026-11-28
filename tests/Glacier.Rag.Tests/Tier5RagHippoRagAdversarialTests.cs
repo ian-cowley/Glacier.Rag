@@ -76,7 +76,11 @@ public class Tier5RagHippoRagAdversarialTests
         }
         finally
         {
-            if (File.Exists(tempFile)) try { File.Delete(tempFile); } catch { }
+            if (File.Exists(tempFile))
+            {
+                try { File.Delete(tempFile); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
         }
     }
 
@@ -149,7 +153,11 @@ public class Tier5RagHippoRagAdversarialTests
         }
         finally
         {
-            if (File.Exists(tempFile)) try { File.Delete(tempFile); } catch { }
+            if (File.Exists(tempFile))
+            {
+                try { File.Delete(tempFile); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
         }
     }
 
@@ -202,7 +210,11 @@ public class Tier5RagHippoRagAdversarialTests
         }
         finally
         {
-            if (File.Exists(tempFile)) try { File.Delete(tempFile); } catch { }
+            if (File.Exists(tempFile))
+            {
+                try { File.Delete(tempFile); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
         }
     }
 
@@ -269,7 +281,11 @@ public class Tier5RagHippoRagAdversarialTests
         }
         finally
         {
-            if (File.Exists(tempFile)) try { File.Delete(tempFile); } catch { }
+            if (File.Exists(tempFile))
+            {
+                try { File.Delete(tempFile); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
         }
     }
 }

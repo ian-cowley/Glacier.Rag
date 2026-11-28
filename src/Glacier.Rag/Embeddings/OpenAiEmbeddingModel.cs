@@ -19,6 +19,15 @@ internal sealed class OpenAiEmbeddingRequest
     public string Input { get; set; } = string.Empty;
 }
 
+internal sealed class OpenAiBatchEmbeddingRequest
+{
+    [JsonPropertyName("model")]
+    public string Model { get; set; } = string.Empty;
+
+    [JsonPropertyName("input")]
+    public string[] Input { get; set; } = [];
+}
+
 internal sealed class OpenAiEmbeddingResponse
 {
     [JsonPropertyName("data")]
@@ -27,12 +36,16 @@ internal sealed class OpenAiEmbeddingResponse
 
 internal sealed class OpenAiEmbeddingData
 {
+    [JsonPropertyName("index")]
+    public int? Index { get; set; }
+
     [JsonPropertyName("embedding")]
     public float[]? Embedding { get; set; }
 }
 
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]
 [JsonSerializable(typeof(OpenAiEmbeddingRequest))]
+[JsonSerializable(typeof(OpenAiBatchEmbeddingRequest))]
 [JsonSerializable(typeof(OpenAiEmbeddingResponse))]
 internal partial class OpenAiEmbeddingJsonContext : JsonSerializerContext
 {
@@ -232,8 +245,73 @@ public sealed class OpenAiEmbeddingModel : IEmbeddingModel
                 $"Embedding endpoint '{_embeddingsUrl}' returned {raw.Length} dimensions, expected {Dimensions}.");
         }
 
-        NormalizeL2InPlace(raw);
+        SimdEmbeddingMath.NormalizeL2InPlace(raw, 1e-12f);
         return raw;
+    }
+
+    /// <summary>
+    /// Asynchronously fetches and L2-normalizes embeddings for multiple inputs using batched
+    /// <c>POST /v1/embeddings</c> requests partitioned by <paramref name="maxBatchSize"/>.
+    /// </summary>
+    public async Task<float[][]> GenerateEmbeddingsAsync(
+        IReadOnlyList<string> texts,
+        int maxBatchSize = 64,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(texts);
+        if (maxBatchSize <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxBatchSize), "Maximum batch size must be positive.");
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (texts.Count == 0)
+            return [];
+
+        for (int i = 0; i < texts.Count; i++)
+        {
+            ArgumentNullException.ThrowIfNull(texts[i], nameof(texts));
+        }
+
+        var results = new float[texts.Count][];
+        int offset = 0;
+
+        while (offset < texts.Count)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int count = Math.Min(maxBatchSize, texts.Count - offset);
+
+            if (count == 1)
+            {
+                results[offset] = await GenerateEmbeddingAsync(texts[offset], cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                var batch = new string[count];
+                for (int j = 0; j < count; j++)
+                {
+                    batch[j] = texts[offset + j];
+                }
+
+                float[][] batchVectors = await FetchRawEmbeddingsBatchAsync(
+                    _http,
+                    _embeddingsUrl,
+                    _modelId,
+                    _apiKey,
+                    batch,
+                    Dimensions,
+                    cancellationToken).ConfigureAwait(false);
+
+                for (int j = 0; j < count; j++)
+                {
+                    SimdEmbeddingMath.NormalizeL2InPlace(batchVectors[j], 1e-12f);
+                    results[offset + j] = batchVectors[j];
+                }
+            }
+
+            offset += count;
+        }
+
+        return results;
     }
 
     private static string NormalizeBaseUrl(string baseUrl)
@@ -316,23 +394,95 @@ public sealed class OpenAiEmbeddingModel : IEmbeddingModel
         return raw;
     }
 
-    private static void NormalizeL2InPlace(float[] vec)
+    private static async Task<float[][]> FetchRawEmbeddingsBatchAsync(
+        HttpClient httpClient,
+        string embeddingsUrl,
+        string modelId,
+        string? apiKey,
+        string[] inputs,
+        int expectedDimensions,
+        CancellationToken cancellationToken)
     {
-        double sumSq = 0.0;
-        for (int i = 0; i < vec.Length; i++)
+        var payload = new OpenAiBatchEmbeddingRequest
         {
-            double v = vec[i];
-            sumSq += v * v;
+            Model = modelId,
+            Input = inputs
+        };
+
+        string requestJson = JsonSerializer.Serialize(payload, OpenAiEmbeddingJsonContext.Default.OpenAiBatchEmbeddingRequest);
+        using var request = new HttpRequestMessage(HttpMethod.Post, embeddingsUrl)
+        {
+            Content = new StringContent(requestJson, Encoding.UTF8, "application/json")
+        };
+
+        if (apiKey != null)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         }
 
-        if (sumSq > 1e-12)
+        using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        string body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
         {
-            float invNorm = (float)(1.0 / Math.Sqrt(sumSq));
-            for (int i = 0; i < vec.Length; i++)
-            {
-                vec[i] *= invNorm;
-            }
+            throw new HttpRequestException(
+                $"Embedding endpoint '{embeddingsUrl}' returned HTTP {(int)response.StatusCode}: {body}",
+                null,
+                response.StatusCode);
         }
+
+        var parsed = JsonSerializer.Deserialize(body, OpenAiEmbeddingJsonContext.Default.OpenAiEmbeddingResponse);
+        if (parsed?.Data == null || parsed.Data.Count != inputs.Length)
+        {
+            int actualCount = parsed?.Data?.Count ?? 0;
+            throw new InvalidOperationException(
+                $"Embedding endpoint '{embeddingsUrl}' returned {actualCount} embeddings for batch of {inputs.Length} inputs.");
+        }
+
+        var batchResult = new float[inputs.Length][];
+        for (int i = 0; i < parsed.Data.Count; i++)
+        {
+            var item = parsed.Data[i] ?? throw new InvalidOperationException(
+                $"Embedding endpoint '{embeddingsUrl}' returned a null embedding entry at position {i}.");
+
+            int slot = item.Index ?? i;
+            if ((uint)slot >= (uint)inputs.Length)
+            {
+                throw new InvalidOperationException(
+                    $"Embedding endpoint '{embeddingsUrl}' returned out-of-range embedding index {slot} for batch size {inputs.Length}.");
+            }
+
+            if (batchResult[slot] != null)
+            {
+                throw new InvalidOperationException(
+                    $"Embedding endpoint '{embeddingsUrl}' returned duplicate embedding index {slot}.");
+            }
+
+            float[]? raw = item.Embedding;
+            if (raw == null || raw.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Embedding endpoint '{embeddingsUrl}' returned an empty embedding payload at index {slot}.");
+            }
+
+            if (raw.Length != expectedDimensions)
+            {
+                throw new InvalidOperationException(
+                    $"Embedding endpoint '{embeddingsUrl}' returned {raw.Length} dimensions at index {slot}, expected {expectedDimensions}.");
+            }
+
+            for (int k = 0; k < raw.Length; k++)
+            {
+                if (!float.IsFinite(raw[k]))
+                {
+                    throw new InvalidOperationException(
+                        $"Embedding endpoint '{embeddingsUrl}' returned non-finite value at batch index {slot}, element {k}.");
+                }
+            }
+
+            batchResult[slot] = raw;
+        }
+
+        return batchResult;
     }
 
     public void Dispose()

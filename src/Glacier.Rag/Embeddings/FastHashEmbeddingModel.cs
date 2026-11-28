@@ -1,9 +1,7 @@
 namespace Glacier.Rag.Embeddings;
 
 using System;
-using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.Intrinsics;
 
 /// <summary>
 /// Deterministic lexical SIMD feature hashing embedding model.
@@ -56,8 +54,8 @@ public sealed class FastHashEmbeddingModel : IEmbeddingModel
             }
         }
 
-        // Normalize vector to unit length (L2 norm)
-        NormalizeL2(destination.Slice(0, _dimensions));
+        // Normalize vector to unit length (SIMD L2 norm)
+        SimdEmbeddingMath.NormalizeL2InPlace(destination.Slice(0, _dimensions));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -95,46 +93,6 @@ public sealed class FastHashEmbeddingModel : IEmbeddingModel
             hash *= 0x01000193; // FNV prime
         }
         return hash;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void NormalizeL2(Span<float> vec)
-    {
-        int i = 0;
-        int vCount = Vector<float>.Count;
-        var sumVec = Vector<float>.Zero;
-
-        while (i <= vec.Length - vCount)
-        {
-            var v = new Vector<float>(vec.Slice(i, vCount));
-            sumVec += v * v;
-            i += vCount;
-        }
-
-        float sumSq = Vector.Dot(sumVec, Vector<float>.One);
-        while (i < vec.Length)
-        {
-            sumSq += vec[i] * vec[i];
-            i++;
-        }
-
-        if (sumSq > 0f)
-        {
-            float invNorm = 1.0f / MathF.Sqrt(sumSq);
-            var invVec = new Vector<float>(invNorm);
-            i = 0;
-            while (i <= vec.Length - vCount)
-            {
-                var v = new Vector<float>(vec.Slice(i, vCount));
-                (v * invVec).CopyTo(vec.Slice(i, vCount));
-                i += vCount;
-            }
-            while (i < vec.Length)
-            {
-                vec[i] *= invNorm;
-                i++;
-            }
-        }
     }
 
     public void Dispose() { }

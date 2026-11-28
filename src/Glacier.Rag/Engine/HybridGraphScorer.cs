@@ -1,6 +1,7 @@
 namespace Glacier.Rag.Engine;
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Glacier.Graph.Kernels;
@@ -73,11 +74,67 @@ public static class HybridGraphScorer
         if (candidateIds.Count == 0)
             return [];
 
-        // 2. Compute Graph Relevance Scores for every candidate chunk (dense union graph-expanded)
+        // 2. Resolve Query Entities to exact GraphStore node IDs (Ordinal first, OrdinalIgnoreCase fallback)
+        var resolvedQueryEntities = new HashSet<string>(StringComparer.Ordinal);
+        if (queryEntities.Count > 0)
+        {
+            List<string>? unresolvedQueryEntities = null;
+            foreach (var qEnt in queryEntities)
+            {
+                if (graphStore.TryGetInternalId(qEnt, out _))
+                {
+                    resolvedQueryEntities.Add(qEnt);
+                }
+                else
+                {
+                    unresolvedQueryEntities ??= new List<string>();
+                    unresolvedQueryEntities.Add(qEnt);
+                }
+            }
+
+            if (unresolvedQueryEntities != null && graphStore.NodeCount > 0)
+            {
+                bool[] matched = new bool[unresolvedQueryEntities.Count];
+                using (graphStore.AcquireReadLock())
+                {
+                    int nodeCount = graphStore.NodeCount;
+                    for (int i = 1; i <= nodeCount; i++)
+                    {
+                        string extId = graphStore.GetExternalId(i);
+                        if (string.IsNullOrEmpty(extId)) continue;
+                        for (int u = 0; u < unresolvedQueryEntities.Count; u++)
+                        {
+                            if (extId.Equals(unresolvedQueryEntities[u], StringComparison.OrdinalIgnoreCase))
+                            {
+                                resolvedQueryEntities.Add(extId);
+                                matched[u] = true;
+                            }
+                        }
+                    }
+                }
+
+                for (int u = 0; u < unresolvedQueryEntities.Count; u++)
+                {
+                    if (!matched[u])
+                    {
+                        resolvedQueryEntities.Add(unresolvedQueryEntities[u]);
+                    }
+                }
+            }
+            else if (unresolvedQueryEntities != null)
+            {
+                for (int u = 0; u < unresolvedQueryEntities.Count; u++)
+                {
+                    resolvedQueryEntities.Add(unresolvedQueryEntities[u]);
+                }
+            }
+        }
+
+        // 2b. Compute Graph Relevance Scores for every candidate chunk (dense union graph-expanded)
         var graphScores = new Dictionary<string, (float Score, List<GraphRelation> Relations)>(candidateIds.Count, StringComparer.OrdinalIgnoreCase);
         foreach (var candidateId in candidateIds)
         {
-            if (!chunkEntities.TryGetValue(candidateId, out var ents) || queryEntities.Count == 0)
+            if (!chunkEntities.TryGetValue(candidateId, out var ents) || resolvedQueryEntities.Count == 0)
             {
                 graphScores[candidateId] = (0f, []);
                 continue;
@@ -86,7 +143,7 @@ public static class HybridGraphScorer
             float gScore = 0f;
             var rels = new List<GraphRelation>();
 
-            foreach (var qEnt in queryEntities)
+            foreach (var qEnt in resolvedQueryEntities)
             {
                 foreach (var dEnt in ents)
                 {
@@ -229,62 +286,405 @@ public static class HybridGraphScorer
         if (candidateIds.Count == 0)
             return [];
 
-        // 2. Personalized PageRank across Query Seed Entities
+        // 2. Personalized PageRank across Query Seed Entities (Ordinal first, OrdinalIgnoreCase fallback)
         var seedEntities = new List<int>(queryEntities.Count);
+        var seenSeedIds = new HashSet<int>();
+        List<string>? unresolvedQueryEntities = null;
         foreach (var qEnt in queryEntities)
         {
             if (csrStore.TryGetInternalId(qEnt, out int internalId))
             {
-                seedEntities.Add(internalId);
-            }
-        }
-
-        float[] pprScores = new float[csrStore.NodeCount + 1];
-        if (seedEntities.Count > 0 && csrStore.NodeCount > 0)
-        {
-            CsrKernels.PersonalizedPageRank(
-                csrStore,
-                CollectionsMarshal.AsSpan(seedEntities),
-                ReadOnlySpan<float>.Empty,
-                pprScores,
-                alpha: alpha,
-                maxIterations: pprIterations);
-        }
-
-        // 3. Compute Graph Relevance Scores for candidate chunks via constituent entity PPR scores
-        var graphScores = new Dictionary<string, (float Score, List<GraphRelation> Relations)>(candidateIds.Count, StringComparer.OrdinalIgnoreCase);
-        foreach (var candidateId in candidateIds)
-        {
-            if (!chunkEntities.TryGetValue(candidateId, out var ents) || ents.Count == 0 || seedEntities.Count == 0)
-            {
-                graphScores[candidateId] = (0f, []);
-                continue;
-            }
-
-            float gScore = 0f;
-            var rels = new List<GraphRelation>();
-
-            foreach (var dEnt in ents)
-            {
-                if (csrStore.TryGetInternalId(dEnt, out int dInternalId) && dInternalId < pprScores.Length)
+                if (seenSeedIds.Add(internalId))
                 {
-                    float p = pprScores[dInternalId];
-                    if (p > 0f)
+                    seedEntities.Add(internalId);
+                }
+            }
+            else
+            {
+                unresolvedQueryEntities ??= new List<string>();
+                unresolvedQueryEntities.Add(qEnt);
+            }
+        }
+
+        if (unresolvedQueryEntities != null && csrStore.NodeCount > 0)
+        {
+            int csrNodeCount = csrStore.NodeCount;
+            for (int i = 1; i <= csrNodeCount; i++)
+            {
+                string extId = csrStore.GetExternalId(i);
+                if (string.IsNullOrEmpty(extId)) continue;
+                for (int u = 0; u < unresolvedQueryEntities.Count; u++)
+                {
+                    if (extId.Equals(unresolvedQueryEntities[u], StringComparison.OrdinalIgnoreCase) &&
+                        seenSeedIds.Add(i))
                     {
-                        gScore += p;
-                        rels.Add(new GraphRelation
-                        {
-                            Source = "QUERY",
-                            Target = dEnt,
-                            Relation = $"PPR_{p:F5}"
-                        });
+                        seedEntities.Add(i);
                     }
                 }
             }
-
-            graphScores[candidateId] = (gScore, rels);
         }
 
+        float[]? rentedPpr = null;
+        int bufSize = csrStore.NodeCount + 1;
+        Span<float> pprScores = bufSize <= 1024
+            ? stackalloc float[bufSize]
+            : (rentedPpr = ArrayPool<float>.Shared.Rent(bufSize)).AsSpan(0, bufSize);
+
+        try
+        {
+            if (seedEntities.Count > 0 && csrStore.NodeCount > 0)
+            {
+                CsrKernels.PersonalizedPageRank(
+                    csrStore,
+                    CollectionsMarshal.AsSpan(seedEntities),
+                    ReadOnlySpan<float>.Empty,
+                    pprScores,
+                    alpha: alpha,
+                    maxIterations: pprIterations);
+            }
+            else
+            {
+                pprScores.Clear();
+            }
+
+            // 3. Compute Graph Relevance Scores for candidate chunks via constituent entity PPR scores
+            var graphScores = new Dictionary<string, (float Score, List<GraphRelation> Relations)>(candidateIds.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var candidateId in candidateIds)
+            {
+                if (!chunkEntities.TryGetValue(candidateId, out var ents) || ents.Count == 0 || seedEntities.Count == 0)
+                {
+                    graphScores[candidateId] = (0f, []);
+                    continue;
+                }
+
+                float gScore = 0f;
+                var rels = new List<GraphRelation>();
+
+                foreach (var dEnt in ents)
+                {
+                    if (csrStore.TryGetInternalId(dEnt, out int dInternalId) && (uint)dInternalId < (uint)pprScores.Length)
+                    {
+                        float p = pprScores[dInternalId];
+                        if (p > 0f)
+                        {
+                            gScore += p;
+                            rels.Add(new GraphRelation
+                            {
+                                Source = "QUERY",
+                                Target = dEnt,
+                                Relation = $"PPR_{p:F5}"
+                            });
+                        }
+                    }
+                }
+
+                graphScores[candidateId] = (gScore, rels);
+            }
+
+            return BuildHippoRagRerankedResults(
+                candidateIds,
+                denseRanks,
+                denseScores,
+                graphScores,
+                chunkContentById,
+                denseWeight,
+                kSmoothing,
+                maxResults);
+        }
+        finally
+        {
+            if (rentedPpr != null)
+            {
+                ArrayPool<float>.Shared.Return(rentedPpr);
+            }
+        }
+    }
+
+    internal static List<ScoredChunk> ScoreAndRerankHippoRag(
+        SearchResult[] vectorMatches,
+        IReadOnlySet<string> queryEntities,
+        IReadOnlyDictionary<string, List<string>> chunkEntities,
+        IReadOnlyDictionary<string, string> chunkContentById,
+        InMemoryCsrGraph csrGraph,
+        float denseWeight = 0.5f,
+        int kSmoothing = 60,
+        IReadOnlyCollection<string>? graphCandidateIds = null,
+        int maxResults = 0,
+        float alpha = 0.85f,
+        int pprIterations = 20)
+    {
+        ArgumentNullException.ThrowIfNull(csrGraph);
+
+        return ScoreAndRerankHippoRagCore(
+            vectorMatches,
+            queryEntities,
+            chunkEntities,
+            chunkContentById,
+            csrGraph.RowOffsets,
+            csrGraph.ColumnIndices,
+            csrGraph.EdgeWeights,
+            csrGraph.NodeCount,
+            csrGraph.ExternalToInternalId,
+            csrGraph.ExternalToInternalIdsIgnoreCase,
+            denseWeight,
+            kSmoothing,
+            graphCandidateIds,
+            maxResults,
+            alpha,
+            pprIterations);
+    }
+
+    /// <summary>
+    /// High-performance HippoRAG hybrid retrieval reranker operating directly over contiguous
+    /// in-memory CSR spans without disk temp files or paged cache overhead.
+    /// </summary>
+    public static List<ScoredChunk> ScoreAndRerankHippoRag(
+        SearchResult[] vectorMatches,
+        IReadOnlySet<string> queryEntities,
+        IReadOnlyDictionary<string, List<string>> chunkEntities,
+        IReadOnlyDictionary<string, string> chunkContentById,
+        ReadOnlySpan<int> rowOffsets,
+        ReadOnlySpan<int> columnIndices,
+        ReadOnlySpan<float> edgeWeights,
+        int nodeCount,
+        IReadOnlyDictionary<string, int> externalToInternalId,
+        float denseWeight = 0.5f,
+        int kSmoothing = 60,
+        IReadOnlyCollection<string>? graphCandidateIds = null,
+        int maxResults = 0,
+        float alpha = 0.85f,
+        int pprIterations = 20)
+    {
+        return ScoreAndRerankHippoRagCore(
+            vectorMatches,
+            queryEntities,
+            chunkEntities,
+            chunkContentById,
+            rowOffsets,
+            columnIndices,
+            edgeWeights,
+            nodeCount,
+            externalToInternalId,
+            externalToInternalIdsIgnoreCase: null,
+            denseWeight,
+            kSmoothing,
+            graphCandidateIds,
+            maxResults,
+            alpha,
+            pprIterations);
+    }
+
+    private static List<ScoredChunk> ScoreAndRerankHippoRagCore(
+        SearchResult[] vectorMatches,
+        IReadOnlySet<string> queryEntities,
+        IReadOnlyDictionary<string, List<string>> chunkEntities,
+        IReadOnlyDictionary<string, string> chunkContentById,
+        ReadOnlySpan<int> rowOffsets,
+        ReadOnlySpan<int> columnIndices,
+        ReadOnlySpan<float> edgeWeights,
+        int nodeCount,
+        IReadOnlyDictionary<string, int> externalToInternalId,
+        IReadOnlyDictionary<string, List<int>>? externalToInternalIdsIgnoreCase,
+        float denseWeight,
+        int kSmoothing,
+        IReadOnlyCollection<string>? graphCandidateIds,
+        int maxResults,
+        float alpha,
+        int pprIterations)
+    {
+        ArgumentNullException.ThrowIfNull(vectorMatches);
+        ArgumentNullException.ThrowIfNull(queryEntities);
+        ArgumentNullException.ThrowIfNull(chunkEntities);
+        ArgumentNullException.ThrowIfNull(chunkContentById);
+        ArgumentNullException.ThrowIfNull(externalToInternalId);
+        ArgumentOutOfRangeException.ThrowIfNegative(nodeCount);
+        if (nodeCount > 0 && rowOffsets.Length < nodeCount + 2)
+            throw new ArgumentException("rowOffsets length must be >= nodeCount + 2.", nameof(rowOffsets));
+
+        int extraCount = graphCandidateIds?.Count ?? 0;
+        if (vectorMatches.Length == 0 && extraCount == 0)
+            return [];
+
+        var candidateIds = new List<string>(vectorMatches.Length + extraCount);
+        var seenCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. Compute Dense Ranks & Scores
+        var denseRanks = new Dictionary<string, int>(vectorMatches.Length, StringComparer.OrdinalIgnoreCase);
+        var denseScores = new Dictionary<string, float>(vectorMatches.Length, StringComparer.OrdinalIgnoreCase);
+
+        for (int r = 0; r < vectorMatches.Length; r++)
+        {
+            string id = vectorMatches[r].Metadata ?? string.Empty;
+            if (string.IsNullOrEmpty(id)) continue;
+
+            if (seenCandidates.Add(id))
+            {
+                candidateIds.Add(id);
+                denseRanks[id] = r + 1;
+                denseScores[id] = vectorMatches[r].Score;
+            }
+        }
+
+        if (graphCandidateIds != null)
+        {
+            foreach (var gId in graphCandidateIds)
+            {
+                if (!string.IsNullOrEmpty(gId) && seenCandidates.Add(gId))
+                {
+                    candidateIds.Add(gId);
+                }
+            }
+        }
+
+        if (candidateIds.Count == 0)
+            return [];
+
+        // 2. Personalized PageRank across Query Seed Entities (Ordinal first, OrdinalIgnoreCase fallback)
+        var seedEntities = new List<int>(queryEntities.Count);
+        var seenSeedIds = new HashSet<int>();
+        List<string>? unresolvedQueryEntities = null;
+        foreach (var qEnt in queryEntities)
+        {
+            if (externalToInternalId.TryGetValue(qEnt, out int internalId))
+            {
+                if (seenSeedIds.Add(internalId))
+                {
+                    seedEntities.Add(internalId);
+                }
+            }
+            else if (externalToInternalIdsIgnoreCase != null)
+            {
+                if (externalToInternalIdsIgnoreCase.TryGetValue(qEnt, out var ids))
+                {
+                    for (int i = 0; i < ids.Count; i++)
+                    {
+                        if (seenSeedIds.Add(ids[i]))
+                        {
+                            seedEntities.Add(ids[i]);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                unresolvedQueryEntities ??= new List<string>();
+                unresolvedQueryEntities.Add(qEnt);
+            }
+        }
+
+        if (unresolvedQueryEntities != null && externalToInternalId.Count > 0)
+        {
+            foreach (var kv in externalToInternalId)
+            {
+                for (int i = 0; i < unresolvedQueryEntities.Count; i++)
+                {
+                    if (kv.Key.Equals(unresolvedQueryEntities[i], StringComparison.OrdinalIgnoreCase) &&
+                        seenSeedIds.Add(kv.Value))
+                    {
+                        seedEntities.Add(kv.Value);
+                    }
+                }
+            }
+        }
+
+        float[]? rentedPpr = null;
+        int bufSize = nodeCount + 1;
+        Span<float> pprScores = bufSize <= 1024
+            ? stackalloc float[bufSize]
+            : (rentedPpr = ArrayPool<float>.Shared.Rent(bufSize)).AsSpan(0, bufSize);
+
+        try
+        {
+            if (seedEntities.Count > 0 && nodeCount > 0)
+            {
+                CsrKernels.PersonalizedPageRank(
+                    rowOffsets,
+                    columnIndices,
+                    edgeWeights,
+                    nodeCount,
+                    CollectionsMarshal.AsSpan(seedEntities),
+                    ReadOnlySpan<float>.Empty,
+                    pprScores,
+                    alpha: alpha,
+                    maxIterations: pprIterations);
+            }
+            else
+            {
+                pprScores.Clear();
+            }
+
+            // 3. Compute Graph Relevance Scores for candidate chunks via constituent entity PPR scores
+            var graphScores = new Dictionary<string, (float Score, List<GraphRelation> Relations)>(candidateIds.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var candidateId in candidateIds)
+            {
+                if (!chunkEntities.TryGetValue(candidateId, out var ents) || ents.Count == 0 || seedEntities.Count == 0)
+                {
+                    graphScores[candidateId] = (0f, []);
+                    continue;
+                }
+
+                float gScore = 0f;
+                var rels = new List<GraphRelation>();
+
+                foreach (var dEnt in ents)
+                {
+                    bool found = externalToInternalId.TryGetValue(dEnt, out int dInternalId);
+                    if (!found && externalToInternalIdsIgnoreCase != null &&
+                        externalToInternalIdsIgnoreCase.TryGetValue(dEnt, out var fallbackIds) &&
+                        fallbackIds.Count > 0)
+                    {
+                        dInternalId = fallbackIds[0];
+                        found = true;
+                    }
+
+                    if (found && (uint)dInternalId < (uint)pprScores.Length)
+                    {
+                        float p = pprScores[dInternalId];
+                        if (p > 0f)
+                        {
+                            gScore += p;
+                            rels.Add(new GraphRelation
+                            {
+                                Source = "QUERY",
+                                Target = dEnt,
+                                Relation = $"PPR_{p:F5}"
+                            });
+                        }
+                    }
+                }
+
+                graphScores[candidateId] = (gScore, rels);
+            }
+
+            return BuildHippoRagRerankedResults(
+                candidateIds,
+                denseRanks,
+                denseScores,
+                graphScores,
+                chunkContentById,
+                denseWeight,
+                kSmoothing,
+                maxResults);
+        }
+        finally
+        {
+            if (rentedPpr != null)
+            {
+                ArrayPool<float>.Shared.Return(rentedPpr);
+            }
+        }
+    }
+
+    private static List<ScoredChunk> BuildHippoRagRerankedResults(
+        List<string> candidateIds,
+        Dictionary<string, int> denseRanks,
+        Dictionary<string, float> denseScores,
+        Dictionary<string, (float Score, List<GraphRelation> Relations)> graphScores,
+        IReadOnlyDictionary<string, string> chunkContentById,
+        float denseWeight,
+        int kSmoothing,
+        int maxResults)
+    {
         // 4. Compute Graph Ranks
         var sortedByGraph = new List<KeyValuePair<string, (float Score, List<GraphRelation> Relations)>>(graphScores);
         sortedByGraph.Sort(static (a, b) => b.Value.Score.CompareTo(a.Value.Score));

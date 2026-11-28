@@ -20,7 +20,7 @@ public sealed class DocumentChunk
 }
 
 /// <summary>
-/// Zero-copy, high-speed document chunker supporting paragraph and sliding token windows.
+/// Document chunker supporting paragraph- and sentence-aware sliding character windows.
 /// </summary>
 public static class DocumentChunker
 {
@@ -56,17 +56,24 @@ public static class DocumentChunker
                 }
             }
 
-            string chunkContent = text.Substring(currentPos, take).Trim();
-            if (!string.IsNullOrWhiteSpace(chunkContent))
+            int sliceStart = currentPos;
+            int sliceEnd = currentPos + take;
+            while (sliceStart < sliceEnd && char.IsWhiteSpace(text[sliceStart]))
+                sliceStart++;
+            while (sliceEnd > sliceStart && char.IsWhiteSpace(text[sliceEnd - 1]))
+                sliceEnd--;
+
+            if (sliceStart < sliceEnd)
             {
+                string chunkContent = text.Substring(sliceStart, sliceEnd - sliceStart);
                 chunks.Add(new DocumentChunk
                 {
                     ChunkId = $"{documentId}_{chunkIdx}",
                     DocumentId = documentId,
                     ChunkIndex = chunkIdx++,
                     Content = chunkContent,
-                    StartChar = currentPos,
-                    EndChar = currentPos + take
+                    StartChar = sliceStart,
+                    EndChar = sliceEnd
                 });
             }
 

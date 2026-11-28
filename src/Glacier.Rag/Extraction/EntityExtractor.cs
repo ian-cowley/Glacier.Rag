@@ -60,6 +60,8 @@ public static partial class EntityExtractor
         ("notifies", "NOTIFIES")
     ];
 
+    private readonly record struct EntityOccurrence(int Start, int End, string Value, int Priority);
+
     /// <summary>
     /// Extracts entities (nodes) and relational triplets (edges) from document text.
     /// </summary>
@@ -71,39 +73,43 @@ public static partial class EntityExtractor
         if (string.IsNullOrWhiteSpace(text))
             return ([], triplets);
 
-        var rawOccurrences = new List<(int Index, string Value)>(16);
+        var rawOccurrences = new List<EntityOccurrence>(16);
 
-        // 1. Extract quoted terms
+        // 1. Extract quoted terms (single regex pass)
         foreach (Match match in QuotedRegex().Matches(text))
         {
             string val = (match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value).Trim();
             if (val.Length >= 2 && !IsCommonKeyword(val))
             {
-                rawOccurrences.Add((match.Index, val));
+                rawOccurrences.Add(new EntityOccurrence(match.Index, match.Index + match.Length, val, Priority: 0));
             }
         }
 
-        // 2. Extract PascalCase entities
+        // 2. Extract PascalCase entities (single regex pass)
         foreach (Match match in PascalCaseRegex().Matches(text))
         {
             string val = match.Value;
             if (val.Length > 2 && !IsCommonKeyword(val))
             {
-                rawOccurrences.Add((match.Index, val));
+                rawOccurrences.Add(new EntityOccurrence(match.Index, match.Index + match.Length, val, Priority: 1));
             }
         }
 
-        // 3. Extract uppercase technical acronyms
+        // 3. Extract uppercase technical acronyms (single regex pass)
         foreach (Match match in AcronymRegex().Matches(text))
         {
             string val = match.Value;
             if (val.Length >= 2 && !IsCommonKeyword(val))
             {
-                rawOccurrences.Add((match.Index, val));
+                rawOccurrences.Add(new EntityOccurrence(match.Index, match.Index + match.Length, val, Priority: 2));
             }
         }
 
-        rawOccurrences.Sort(static (a, b) => a.Index.CompareTo(b.Index));
+        rawOccurrences.Sort(static (a, b) =>
+        {
+            int cmp = a.Start.CompareTo(b.Start);
+            return cmp != 0 ? cmp : a.Priority.CompareTo(b.Priority);
+        });
 
         var foundEntitiesInOrder = new List<string>(rawOccurrences.Count);
         for (int i = 0; i < rawOccurrences.Count; i++)
@@ -114,34 +120,25 @@ public static partial class EntityExtractor
             }
         }
 
-        // 4. Extract relation triplets based on sentence proximity and word-bounded triggers
-        var sentences = text.Split(['.', ';', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        foreach (var sentence in sentences)
+        // 4. Extract relation triplets using cached occurrences & zero-regex sentence-span scans
+        int segStart = 0;
+        for (int pos = 0; pos <= text.Length; pos++)
         {
-            foreach (var (phrase, rel) in RelationTriggers)
+            if (pos == text.Length || text[pos] == '.' || text[pos] == ';' || text[pos] == '\n')
             {
-                int searchFrom = 0;
-                while (searchFrom < sentence.Length)
+                int sentStart = segStart;
+                int sentEnd = pos;
+                while (sentStart < sentEnd && char.IsWhiteSpace(text[sentStart]))
+                    sentStart++;
+                while (sentEnd > sentStart && char.IsWhiteSpace(text[sentEnd - 1]))
+                    sentEnd--;
+
+                if (sentStart < sentEnd)
                 {
-                    int phraseIdx = sentence.IndexOf(phrase, searchFrom, StringComparison.OrdinalIgnoreCase);
-                    if (phraseIdx < 0) break;
-
-                    if (phraseIdx > 0 && IsWordBounded(sentence, phraseIdx, phrase.Length))
-                    {
-                        string left = sentence.Substring(0, phraseIdx);
-                        string right = sentence.Substring(phraseIdx + phrase.Length);
-
-                        string? subj = FindClosestEntity(left, fromEnd: true);
-                        string? obj = FindClosestEntity(right, fromEnd: false);
-
-                        if (subj != null && obj != null && !subj.Equals(obj, StringComparison.OrdinalIgnoreCase))
-                        {
-                            triplets.Add(new EntityTriplet(subj, rel, obj));
-                        }
-                    }
-
-                    searchFrom = phraseIdx + phrase.Length;
+                    ScanSentenceTriplets(text, sentStart, sentEnd, rawOccurrences, triplets);
                 }
+
+                segStart = pos + 1;
             }
         }
 
@@ -159,56 +156,110 @@ public static partial class EntityExtractor
         return (foundEntitiesInOrder, triplets);
     }
 
-    private static bool IsWordBounded(string text, int index, int length)
+    private static void ScanSentenceTriplets(
+        string text,
+        int sentStart,
+        int sentEnd,
+        List<EntityOccurrence> occurrences,
+        List<EntityTriplet> triplets)
     {
-        bool leftOk = index == 0 || !char.IsLetterOrDigit(text[index - 1]);
-        int end = index + length;
-        bool rightOk = end >= text.Length || !char.IsLetterOrDigit(text[end]);
-        return leftOk && rightOk;
+        if (occurrences.Count == 0)
+            return;
+
+        int firstInSentence = LowerBound(occurrences, sentStart);
+        if (firstInSentence >= occurrences.Count || occurrences[firstInSentence].Start >= sentEnd)
+            return;
+
+        ReadOnlySpan<char> textSpan = text.AsSpan();
+        foreach (var (phrase, rel) in RelationTriggers)
+        {
+            int searchFrom = sentStart;
+            while (searchFrom < sentEnd)
+            {
+                int relIdx = textSpan.Slice(searchFrom, sentEnd - searchFrom).IndexOf(phrase, StringComparison.OrdinalIgnoreCase);
+                if (relIdx < 0)
+                    break;
+
+                int phraseIdx = searchFrom + relIdx;
+                if (phraseIdx > sentStart && IsWordBoundedInRange(text, sentStart, sentEnd, phraseIdx, phrase.Length))
+                {
+                    string? subj = FindClosestLeft(occurrences, firstInSentence, phraseIdx);
+                    string? obj = FindClosestRight(occurrences, phraseIdx + phrase.Length, sentEnd);
+
+                    if (subj != null && obj != null && !subj.Equals(obj, StringComparison.OrdinalIgnoreCase))
+                    {
+                        triplets.Add(new EntityTriplet(subj, rel, obj));
+                    }
+                }
+
+                searchFrom = phraseIdx + phrase.Length;
+            }
+        }
     }
 
-    private static string? FindClosestEntity(string slice, bool fromEnd)
+    private static int LowerBound(List<EntityOccurrence> occurrences, int minStart)
+    {
+        int lo = 0;
+        int hi = occurrences.Count;
+        while (lo < hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            if (occurrences[mid].Start < minStart)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo;
+    }
+
+    private static string? FindClosestLeft(List<EntityOccurrence> occurrences, int firstInSentence, int phraseIdx)
     {
         string? bestVal = null;
-        int bestPos = fromEnd ? -1 : int.MaxValue;
+        int bestEnd = -1;
+        int bestPriority = int.MaxValue;
 
-        foreach (Match m in QuotedRegex().Matches(slice))
+        for (int i = firstInSentence; i < occurrences.Count; i++)
         {
-            string val = (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value).Trim();
-            if (val.Length < 2 || IsCommonKeyword(val)) continue;
-            int pos = fromEnd ? m.Index + m.Length : m.Index;
-            if ((fromEnd && pos > bestPos) || (!fromEnd && pos < bestPos))
-            {
-                bestPos = pos;
-                bestVal = val;
-            }
-        }
+            var occ = occurrences[i];
+            if (occ.Start >= phraseIdx)
+                break;
 
-        foreach (Match m in PascalCaseRegex().Matches(slice))
-        {
-            string val = m.Value;
-            if (val.Length <= 2 || IsCommonKeyword(val)) continue;
-            int pos = fromEnd ? m.Index + m.Length : m.Index;
-            if ((fromEnd && pos > bestPos) || (!fromEnd && pos < bestPos))
+            if (occ.End <= phraseIdx)
             {
-                bestPos = pos;
-                bestVal = val;
-            }
-        }
-
-        foreach (Match m in AcronymRegex().Matches(slice))
-        {
-            string val = m.Value;
-            if (val.Length < 2 || IsCommonKeyword(val)) continue;
-            int pos = fromEnd ? m.Index + m.Length : m.Index;
-            if ((fromEnd && pos > bestPos) || (!fromEnd && pos < bestPos))
-            {
-                bestPos = pos;
-                bestVal = val;
+                if (occ.End > bestEnd || (occ.End == bestEnd && occ.Priority < bestPriority))
+                {
+                    bestEnd = occ.End;
+                    bestPriority = occ.Priority;
+                    bestVal = occ.Value;
+                }
             }
         }
 
         return bestVal;
+    }
+
+    private static string? FindClosestRight(List<EntityOccurrence> occurrences, int phraseEnd, int sentEnd)
+    {
+        int idx = LowerBound(occurrences, phraseEnd);
+        for (int i = idx; i < occurrences.Count; i++)
+        {
+            var occ = occurrences[i];
+            if (occ.Start >= sentEnd)
+                break;
+
+            if (occ.End <= sentEnd)
+                return occ.Value;
+        }
+
+        return null;
+    }
+
+    private static bool IsWordBoundedInRange(string text, int sentStart, int sentEnd, int index, int length)
+    {
+        bool leftOk = index == sentStart || !char.IsLetterOrDigit(text[index - 1]);
+        int end = index + length;
+        bool rightOk = end >= sentEnd || !char.IsLetterOrDigit(text[end]);
+        return leftOk && rightOk;
     }
 
     private static bool IsCommonKeyword(string word) => word switch

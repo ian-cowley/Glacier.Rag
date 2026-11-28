@@ -1,14 +1,16 @@
 namespace Glacier.Rag.Embeddings;
 
 using System;
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
 /// <summary>
-/// Vectorized linear projection embedding model implementing AVX-512 / AVX2 GEMV projection and L2 normalization.
+/// Vectorized linear projection embedding model implementing AVX-512 / AVX2 / Vector128 GEMV projection and SIMD L2 normalization.
 /// Transforms upstream embeddings (e.g. 4096-dim token representations or intermediate embeddings)
-/// into a target vector space (e.g. 768 or 384 dimensions) with zero heap allocation on the hot path.
+/// into a target vector space (e.g. 768 or 384 dimensions) with zero per-call heap allocation on the hot path.
 /// </summary>
 public sealed class LinearProjectionEmbeddingModel : IEmbeddingModel
 {
@@ -29,13 +31,18 @@ public sealed class LinearProjectionEmbeddingModel : IEmbeddingModel
         float[]? bias = null)
     {
         _upstreamModel = upstreamModel ?? throw new ArgumentNullException(nameof(upstreamModel));
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(outputDim, 0);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(upstreamModel.Dimensions, 0);
+
         _inputDim = upstreamModel.Dimensions;
         _outputDim = outputDim;
+        int expectedWeightCount = checked(_outputDim * _inputDim);
+
         _weights = weights ?? throw new ArgumentNullException(nameof(weights));
         _bias = bias ?? new float[outputDim];
 
-        if (weights.Length != _outputDim * _inputDim)
-            throw new ArgumentException($"Weights length must be {outputDim} x {_inputDim} = {outputDim * _inputDim}, got {weights.Length}");
+        if (weights.Length != expectedWeightCount)
+            throw new ArgumentException($"Weights length must be {outputDim} x {_inputDim} = {expectedWeightCount}, got {weights.Length}");
         if (_bias.Length != _outputDim)
             throw new ArgumentException($"Bias length must be {outputDim}, got {_bias.Length}");
     }
@@ -49,9 +56,13 @@ public sealed class LinearProjectionEmbeddingModel : IEmbeddingModel
         int seed = 1337)
     {
         _upstreamModel = upstreamModel ?? throw new ArgumentNullException(nameof(upstreamModel));
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(outputDim, 0);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(upstreamModel.Dimensions, 0);
+
         _inputDim = upstreamModel.Dimensions;
         _outputDim = outputDim;
-        _weights = new float[_outputDim * _inputDim];
+        int totalWeights = checked(_outputDim * _inputDim);
+        _weights = new float[totalWeights];
         _bias = new float[_outputDim];
 
         // Initialize with scaled Gaussian-like values (Xavier/He initialization style: std = sqrt(2 / inputDim))
@@ -73,15 +84,30 @@ public sealed class LinearProjectionEmbeddingModel : IEmbeddingModel
         if (destination.Length < _outputDim)
             throw new ArgumentException($"Destination span too small. Expected {_outputDim}, got {destination.Length}");
 
-        // Compute upstream embedding
-        Span<float> inputEmb = _inputDim <= 1024 ? stackalloc float[_inputDim] : new float[_inputDim];
-        _upstreamModel.GenerateEmbedding(text, inputEmb);
+        // Compute upstream embedding without per-call heap allocations (stackalloc <= 1024, ArrayPool > 1024)
+        float[]? rentedInput = null;
+        Span<float> inputEmb = _inputDim <= 1024
+            ? stackalloc float[_inputDim]
+            : (rentedInput = ArrayPool<float>.Shared.Rent(_inputDim)).AsSpan(0, _inputDim);
 
-        // Compute GEMV: destination = Weights * inputEmb + Bias
-        GemvProject(inputEmb, destination.Slice(0, _outputDim));
+        try
+        {
+            _upstreamModel.GenerateEmbedding(text, inputEmb);
 
-        // Normalize to unit length (L2 norm)
-        NormalizeL2(destination.Slice(0, _outputDim));
+            // Compute GEMV: destination = Weights * inputEmb + Bias
+            Span<float> outSlice = destination.Slice(0, _outputDim);
+            GemvProject(inputEmb, outSlice);
+
+            // Normalize to unit length (SIMD L2 norm)
+            SimdEmbeddingMath.NormalizeL2InPlace(outSlice);
+        }
+        finally
+        {
+            if (rentedInput != null)
+            {
+                ArrayPool<float>.Shared.Return(rentedInput);
+            }
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -94,7 +120,7 @@ public sealed class LinearProjectionEmbeddingModel : IEmbeddingModel
         {
             for (int r = 0; r < _outputDim; r++)
             {
-                float* rowW = pW + r * _inputDim;
+                float* rowW = pW + (nuint)r * (nuint)_inputDim;
                 float sum = pB[r];
 
                 int c = 0;
@@ -121,33 +147,30 @@ public sealed class LinearProjectionEmbeddingModel : IEmbeddingModel
                     }
                     sum += Vector256.Sum(acc);
                 }
+                // 3. Vector128 (ARM64 NEON / SSE) Vector Path (4 floats per iteration)
+                else if (Vector128.IsHardwareAccelerated && _inputDim >= 4)
+                {
+                    var acc = Vector128<float>.Zero;
+                    for (; c <= _inputDim - 4; c += 4)
+                    {
+                        var vSrc = Vector128.Load(pSrc + c);
+                        var vW = Vector128.Load(rowW + c);
+                        acc = Fma.IsSupported
+                            ? Fma.MultiplyAdd(vSrc, vW, acc)
+                            : AdvSimd.IsSupported
+                                ? AdvSimd.FusedMultiplyAdd(acc, vSrc, vW)
+                                : Vector128.Add(acc, Vector128.Multiply(vSrc, vW));
+                    }
+                    sum += Vector128.Sum(acc);
+                }
 
-                // 3. Scalar cleanup
+                // 4. Scalar cleanup
                 for (; c < _inputDim; c++)
                 {
                     sum += pSrc[c] * rowW[c];
                 }
 
                 pDst[r] = sum;
-            }
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void NormalizeL2(Span<float> vec)
-    {
-        float sumSq = 0f;
-        for (int i = 0; i < vec.Length; i++)
-        {
-            sumSq += vec[i] * vec[i];
-        }
-
-        if (sumSq > 0f)
-        {
-            float invNorm = 1.0f / MathF.Sqrt(sumSq);
-            for (int i = 0; i < vec.Length; i++)
-            {
-                vec[i] *= invNorm;
             }
         }
     }

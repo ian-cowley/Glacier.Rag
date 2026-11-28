@@ -84,7 +84,8 @@ public class HippoRagRetrievalTests
         {
             if (File.Exists(tempFile))
             {
-                try { File.Delete(tempFile); } catch { }
+                try { File.Delete(tempFile); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             }
         }
     }

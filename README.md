@@ -17,7 +17,7 @@
   GRAPHRAG QUERY LATENCY BENCHMARK: IN-PROCESS VS. DISTRIBUTED MULTI-DAEMON
 ========================================================================================================
   Distributed Python Stack (LangChain + ChromaDB + Neo4j via TCP IPC) :  12,000 – 18,000 ms (end-to-end)
-  Glacier.Rag (.NET 10 - In-Process Memory-Mapped Hybrid Retrieval)   :  0.027 – 0.029 ms (27–29 µs)
+  Glacier.Rag (.NET 10 - In-Process Hybrid Retrieval)                 :  0.027 – 0.029 ms (27–29 µs)
 --------------------------------------------------------------------------------------------------------
   ⚡ ARCHITECTURAL GAIN                               :  Elimination of 3 separate TCP network hops & JSON IPC
   ⚡ NETWORK OVERHEAD                                  :  0 ms (Direct In-Memory Buffer Access)
@@ -34,10 +34,10 @@ For reference, Glacier.Graph BFS over 450k nodes / 700k edges takes 7.51 ms RAM-
 ```mermaid
 flowchart LR
     Q["User Query"] --> EMB["FastHash SIMD Embedding"]
-    EMB --> VEC["<b>Glacier.Vector</b><br/>622M vec/s SIMD Scan"]
+    EMB --> VEC["<b>Glacier.Vector</b><br/>HNSW SIMD Vector Index"]
     Q --> EXT["Entity Extractor"]
-    EXT --> GRP["<b>Glacier.Graph</b><br/>CSR Forward-Star Hops"]
-    VEC --> FUS["<b>In-Process Fusion</b><br/>0.027 ms (27 µs)"]
+    EXT --> GRP["<b>Glacier.Graph</b><br/>In-Memory CSR PPR & Hops"]
+    VEC --> FUS["<b>In-Process Fusion</b><br/>topK*4 RRF + PPR"]
     GRP --> FUS
     FUS --> INF["<b>Glacier.Inference</b><br/>RTX 4060 GPU SASS"]
     INF --> RES["Streaming Answer"]
@@ -59,9 +59,9 @@ In traditional Python setups, building enterprise GraphRAG requires gluing toget
 Each query pays the penalty of **multiple TCP socket round-trips**, JSON marshaling, GC pauses, and inter-process serialization.
 
 **Glacier.Rag** consolidates all four into a single, in-process .NET 10 engine:
-* **`Glacier.Vector` Core**: 622M vectors/sec hardware SIMD dot product scans.
-* **`Glacier.Graph` Core**: Zero-allocation Forward-Star CSR graph traversal with hub pruning and full predicate retention (`Source -> Predicate -> Target`).
-* **`Glacier.Inference` Core**: In-process GGUF embedding extraction (`GlacierInferenceEmbeddingModel`) and bare-metal GPU/CPU streaming generation.
+* **`Glacier.Vector` Core**: Approximate nearest-neighbor HNSW vector search (`HnswVectorIndex`, `m=16`, `efConstruction=100`) with hardware SIMD cosine/dot-product kernels.
+* **`Glacier.Graph` Core**: Contiguous in-memory Compressed Sparse Row (CSR) Personalized PageRank (`CsrKernels.PersonalizedPageRank`) and Forward-Star traversal with hub pruning and full predicate retention (`Source -> Predicate -> Target`).
+* **`Glacier.Inference` Core**: In-process GGUF embedding extraction (`GlacierInferenceEmbeddingModel`), model-native chat template formatting (`FormatChat`), and bare-metal GPU/CPU streaming generation.
 
 ---
 
