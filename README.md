@@ -1,160 +1,101 @@
-![Glacier AI Banner](assets/banner.jpg)
+![Glacier.Rag Banner](assets/banner.jpg)
 
-# ⚡ Glacier.Rag
+# Glacier.Rag
 
+[![CI](https://github.com/ian-cowley/Glacier.Rag/actions/workflows/dotnet.yml/badge.svg)](https://github.com/ian-cowley/Glacier.Rag/actions/workflows/dotnet.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
-[![Native AOT](https://img.shields.io/badge/Native%20AOT-Ready-brightgreen.svg)](https://learn.microsoft.com/dotnet/core/deploying/native-aot/)
-[![NuGet Version](https://img.shields.io/nuget/v/Glacier.Rag.svg)](https://www.nuget.org/packages/Glacier.Rag/)
-[![Ecosystem](https://img.shields.io/badge/Glacier-Ecosystem-blue)](https://github.com/ian-cowley)
-[![Website](https://img.shields.io/badge/Website-glaciersoftware.dev-66fcf1.svg)](https://glaciersoftware.dev/)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-orange.svg?logo=buy-me-a-coffee)](https://buymeacoffee.com/glaciersoftware)
+![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)
+![NativeAOT](https://img.shields.io/badge/NativeAOT-Compatible-brightgreen.svg)
 
-> **Pure C# .NET 10 In-Process Native GraphRAG Engine (Systematically Beating Python LangChain, LlamaIndex, Chroma & Neo4j)**
+`Glacier.Rag` is an in-process GraphRAG library for .NET 10. It stores dense semantic embeddings (`Glacier.Vector`), extracted entity graphs (`Glacier.Graph`), and local language model sessions (`Glacier.Inference`) inside one memory space—with no external vector database or graph service required.
 
-```text
-========================================================================================================
-  GRAPHRAG QUERY LATENCY BENCHMARK: IN-PROCESS VS. DISTRIBUTED MULTI-DAEMON
-========================================================================================================
-  Distributed Python Stack (LangChain + ChromaDB + Neo4j via TCP IPC) :  12,000 – 18,000 ms (end-to-end)
-  Glacier.Rag (.NET 10 - In-Process Hybrid Retrieval)                 :  0.027 – 0.029 ms (27–29 µs)
---------------------------------------------------------------------------------------------------------
-  ⚡ ARCHITECTURAL GAIN                               :  Elimination of 3 separate TCP network hops & JSON IPC
-  ⚡ NETWORK OVERHEAD                                  :  0 ms (Direct In-Memory Buffer Access)
-  ⚡ SERIALIZATION                                     :  0 ms (Zero JSON / Zero Protobuf IPC Churn)
-  ⚡ PEAK RAM CONSUMPTION                              :  < 50 MB (vs 4+ GB across 4 separate runtime daemons)
-========================================================================================================
-*Note: The 27-29 µs retrieval metric measures in-process steady-state vector scan + CSR graph hops on local memory.
-The multi-second comparison includes inter-process TCP roundtrips, daemon connection handshakes, and JSON marshaling.
-The 27-29 µs figure was measured on a tiny corpus (2 chunks, 29 nodes, 15 edges); it is not a large-scale result.
-For reference, Glacier.Graph BFS over 450k nodes / 700k edges takes 7.51 ms RAM-resident (Forward Star) and 247.98 ms out-of-core CSR under a 256 KB RAM limit.
+---
 
+## Install
+
+```bash
+dotnet add package Glacier.Rag
 ```
 
-```mermaid
-flowchart LR
-    Q["User Query"] --> EMB["FastHash SIMD Embedding"]
-    EMB --> VEC["<b>Glacier.Vector</b><br/>HNSW SIMD Vector Index"]
-    Q --> EXT["Entity Extractor"]
-    EXT --> GRP["<b>Glacier.Graph</b><br/>In-Memory CSR PPR & Hops"]
-    VEC --> FUS["<b>In-Process Fusion</b><br/>topK*4 RRF + PPR"]
-    GRP --> FUS
-    FUS --> INF["<b>Glacier.Inference</b><br/>RTX 4060 GPU SASS"]
-    INF --> RES["Streaming Answer"]
+Or build from source:
 
-    style FUS fill:#15803d,stroke:#22c55e,stroke-width:2px,color:#fff
-    style INF fill:#1d4ed8,stroke:#38bdf8,stroke-width:2px,color:#fff
+```bash
+git clone https://github.com/ian-cowley/Glacier.Rag.git
+cd Glacier.Rag
+dotnet test Glacier.Rag.slnx -c Release
 ```
 
 ---
 
-## 1. Why Glacier.Rag? Replacing the Brittle Python/JVM Stack
+## Quick Start
 
-In traditional Python setups, building enterprise GraphRAG requires gluing together multiple independent daemons:
-1. **ChromaDB / Qdrant** (Vector Database in Python/Rust/Go).
-2. **Neo4j / Memgraph** (Graph Database in JVM/C++).
-3. **LangChain / LlamaIndex** (Python orchestration framework).
-4. **vLLM / Ollama** (Inference server).
-
-Each query pays the penalty of **multiple TCP socket round-trips**, JSON marshaling, GC pauses, and inter-process serialization.
-
-**Glacier.Rag** consolidates all four into a single, in-process .NET 10 engine:
-* **`Glacier.Vector` Core**: Approximate nearest-neighbor HNSW vector search (`HnswVectorIndex`, `m=16`, `efConstruction=100`) with hardware SIMD cosine/dot-product kernels.
-* **`Glacier.Graph` Core**: Contiguous in-memory Compressed Sparse Row (CSR) Personalized PageRank (`CsrKernels.PersonalizedPageRank`) and Forward-Star traversal with hub pruning and full predicate retention (`Source -> Predicate -> Target`).
-* **`Glacier.Inference` Core**: In-process GGUF embedding extraction (`GlacierInferenceEmbeddingModel`), model-native chat template formatting (`FormatChat`), and bare-metal GPU/CPU streaming generation.
-
----
-
-## 2. Quickstart
-
-### Hybrid Retrieval with Knowledge Graph Triplet Preservation
+Index documents and retrieve hybrid vector + knowledge-graph context:
 
 ```csharp
 using Glacier.Rag.Embeddings;
 using Glacier.Rag.Engine;
 
-// 1. Initialize In-Process GraphRAG Engine (Lexical FastHash or Semantic GlacierInference)
 using var rag = new GraphRagEngine(new FastHashEmbeddingModel(384));
 
-// 2. Ingest Enterprise Documents
-rag.IndexDocument("SPEC-01", @"
-The LedgerService manages all customer balances.
-CustomerRecord streams from SqlServerDatabase using IAsyncEnumerable.
-TransactionJournal records every balance adjustment before mutating LedgerAccount balances.
-LedgerAccountDto validates through FluentValidation.
-");
+rag.IndexDocument("SPEC-LEDGER", """
+    The LedgerService manages all double-entry ledger transactions.
+    LedgerService depends on SqlServerDatabase for durable storage.
+    CustomerRecord streams from SqlServerDatabase with zero buffering.
+    """);
 
-// 3. Query with Sub-Millisecond Hybrid Retrieval & Predicate Preservation
-var result = rag.Retrieve("How does CustomerRecord stream data and how is it validated?", new RagOptions
-{
-    TopK = 3,
-    MaxGraphHops = 2,
-    MaxDegreePerNode = 25 // Hub pruning to prevent context flooding
-});
+HybridRetrievalResult result = rag.Retrieve(
+    "How does CustomerRecord stream data?",
+    new RagOptions { TopK = 3, MaxGraphHops = 2 });
 
-Console.WriteLine($"Total Retrieval Latency: {result.TotalRetrievalLatencyMs:F2} ms");
 foreach (var rel in result.GraphRelations)
 {
-    Console.WriteLine($"Relation: {rel.Source} -> [{rel.Relation}] -> {rel.Target}");
+    Console.WriteLine($"{rel.Source} --[{rel.Relation}]--> {rel.Target}");
 }
-// Output:
-// Relation: CustomerRecord -> [STREAMS_FROM] -> SqlServerDatabase
-// Relation: LedgerAccountDto -> [VALIDATES] -> FluentValidation
+
+string prompt = rag.BuildAugmentedPrompt("How does CustomerRecord stream data?", result);
 ```
 
-### End-to-End In-Process Streaming Generation
+To index and query asynchronously against a local or remote OpenAI-compatible `/v1/embeddings` endpoint (such as AMD XDNA 2 NPU sidecars):
 
 ```csharp
-using Glacier.Inference.Engine;
+using var embedder = await OpenAiEmbeddingModel.CreateAutoAsync(
+    baseUrl: "http://127.0.0.1:52625",
+    modelId: "embeddinggemma");
 
-// Attach a local GGUF model via Glacier.Inference
-using var session = new InferenceSession("models/qwen2.5-7b-instruct.gguf", device: "auto");
-
-// Stream the augmented answer directly in the exact same memory space
-string answer = await rag.AskAsync(
-    "How does CustomerRecord stream data and how is it validated?",
-    session,
-    onToken: token => Console.Write(token)
-);
+using var rag = new GraphRagEngine(embedder);
+await rag.IndexDocumentAsync("SPEC-AUTH", authSpecText);
+var res = await rag.RetrieveAsync("How are tenant claims extracted?");
 ```
 
 ---
 
-## 🆕 What's New in v1.2.0
+## What You Can Do
 
-- **Graph-Expanded Reciprocal Rank Fusion (HybridGraphScorer)** — Unions dense vector hits with multi-hop CSR graph-discovered chunks (Entity -> ChunkId inverted index) so structurally connected evidence is surfaced even when lexically distant, with O(1) incremental chunk lookup and RagOptions.MinSimilarity filtering.
-- **Unique ChunkId Indexing & Resource Lifecycle Safety** — Keys VectorIndex by unique ChunkId (preventing duplicate boilerplate overwrites across documents), coordinates leaveStorageOpen: true and GraphStore.Dispose(), and synchronizes GlacierInferenceEmbeddingModel extraction under concurrent read queries.
-- **Native AOT [GeneratedRegex] Entity & Relation Extraction** — Word-boundary relational trigger matching, document-offset appearance ordering, and CRLF-aware DocumentChunker boundary validation.
-- **Native AOT & OIDC CI** — <IsAotCompatible>true</IsAotCompatible>, <TreatWarningsAsErrors>true</TreatWarningsAsErrors>, upgraded to Glacier.Vector 1.1.0, Glacier.Graph 1.1.0, and Glacier.Inference 1.3.2 with NuGet Trusted Publishing.
-
----
-
-## 🆕 What's New in v1.0.2
-
-- **`ReaderWriterLockSlim` replaces `Monitor`** — allows concurrent read parallelism, dramatically improving throughput under high simultaneous query load.
-- **`LinearProjectionEmbeddingModel`** — AVX-512 GEMV in-process embeddings requiring no external API calls or network round-trips.
-- **`HybridGraphScorer` with RRF (Reciprocal Rank Fusion)** — fuses dense vector and graph retrieval scores for superior retrieval precision.
-- **11 tests** passing (100 %).
+- **Unified Vector + Graph Indexing:** `GraphRagEngine.IndexDocument` / `IndexDocumentAsync` split text with sentence/paragraph awareness (`DocumentChunker`), store embeddings in an in-memory `HnswVectorIndex`, and record extracted entities and relationships (`EntityExtractor`) into a `GraphStore`.
+- **Four Pluggable Embedding Backends:** Choose between sub-microsecond lexical hashing (`FastHashEmbeddingModel`), SIMD linear projection (`LinearProjectionEmbeddingModel`), local GGUF embeddings via `Glacier.Inference` (`GlacierInferenceEmbeddingModel`), or HTTP batch embeddings via `OpenAiEmbeddingModel`.
+- **HippoRAG PPR Hybrid Reranking:** Combine dense HNSW cosine similarity, cached CSR knowledge-graph Personalized PageRank (`HybridGraphScorer.ScoreAndRerankHippoRag`), and Reciprocal Rank Fusion (RRF).
+- **Prompt Sanitization & Streaming Synthesis:** Escape LLM control tokens automatically (`BuildAugmentedPrompt`) and stream grounded answers in-process with `GraphRagEngine.AskAsync(query, inferenceSession, ...)`.
 
 ---
 
-## Credits
+## Platform & Compatibility
 
-Developed by Ian Cowley and Antigravity (Google DeepMind).
-
----
-
-## License
-
-Licensed under the [MIT License](LICENSE). Copyright (c) 2026 Ian Cowley.
+- **Runtime:** .NET 10 (`net10.0`), Native AOT compatible (`IsAotCompatible=true`).
+- **SIMD Acceleration:** AVX-512F, AVX2/FMA, and `Vector128` intrinsics for L2 normalization and GEMV projections (`SimdEmbeddingMath`, `LinearProjectionEmbeddingModel`).
+- **Cross-Platform:** Tested on Windows and Linux x64 in GitHub Actions CI.
 
 ---
 
-## ❄️ Glacier Ecosystem & Support
+## Documentation
 
-Part of the **[Glacier Ecosystem](https://glaciersoftware.dev/)** — high-performance, zero-allocation developer tooling and data engines natively built for modern C# and .NET 10.
+- [User Manual](docs/manual.md) — Sync/async `GraphRagEngine`, `RagOptions`, chunking, entity extraction, all 4 embedding models, and `AskAsync`
+- [Architecture](docs/architecture.md) — Dual HNSW + CSR graph layout, cached `InMemoryCsrGraph` snapshots, HippoRAG PPR scoring, and concurrency model
+- [Changelog](CHANGELOG.md) — Release history from `v1.0.2` through `v1.4.3`
 
-* 🌐 **Website & Documentation**: [glaciersoftware.dev](https://glaciersoftware.dev/)
-* ☕ **Buy Me a Coffee**: [buymeacoffee.com/glaciersoftware](https://buymeacoffee.com/glaciersoftware)
-* ❤️ **GitHub Sponsors**: [github.com/sponsors/ian-cowley](https://github.com/sponsors/ian-cowley)
-* 🐙 **All Repositories**: [github.com/ian-cowley](https://github.com/ian-cowley)
+---
+
+## License & Credits
+
+Licensed under the [MIT License](LICENSE).
+
+Developed by Ian Cowley, Antigravity (Google DeepMind) and Claude.
